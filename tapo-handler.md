@@ -18,6 +18,7 @@
   asyncio.run(main())
 
   Recurring schedule (device-side):
+  ```
   # Turn on at 11:50am every day
   await dev._query_helper("add_schedule_rule", {
       "name": "morning_on",
@@ -31,6 +32,7 @@
       "desired_states": {"on": True},
       "mode": "repeat",         # "repeat" or "once"
   })
+  ```
 
   Read/delete existing schedules:
   # List
