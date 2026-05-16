@@ -1,5 +1,6 @@
 
-  Countdown timer (device-side):
+  # Countdown timer (device-side):
+```
   import asyncio
   from kasa import Discover, Credentials
 
@@ -16,8 +17,10 @@
       })
 
   asyncio.run(main())
+```
 
-  Recurring schedule (device-side):
+
+  # Recurring schedule (device-side):
   ```
   # Turn on at 11:50am every day
   await dev._query_helper("add_schedule_rule", {
@@ -34,11 +37,13 @@
   })
   ```
 
-  Read/delete existing schedules:
+  # Read/delete existing schedules:
+  ```
   # List
   rules = await dev._query_helper("get_schedule_rules", {"start_index": 0})
 
   # Delete all
   await dev._query_helper("remove_schedule_rules", {"id_list": ["S1", "S2"]})
+  ```
 
   The device stores up to 32 schedule rules and 1 countdown. They persist exactly as if set via the Tapo app.
