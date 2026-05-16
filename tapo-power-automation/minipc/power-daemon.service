@@ -1,0 +1,14 @@
+[Unit]
+Description=Power Failure Detection Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/power-daemon/power_daemon.py
+Restart=always
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target
