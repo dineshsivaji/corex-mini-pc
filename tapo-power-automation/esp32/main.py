@@ -18,12 +18,14 @@ import hashlib
 import json
 import os
 
+
 WIFI_SSID = "Wifi_Name"
 WIFI_PASSWORD = "Wifi_Pass"
 
 TAPO_IP = "192.168.1.x"
 TAPO_EMAIL = "your_email"
 TAPO_PASSWORD = "your_pass"
+
 
 BOOT_DELAY_SEC = 60
 
@@ -204,37 +206,72 @@ def send_turn_on(tapo_ip, email, password):
         seq = int.from_bytes(full_iv[-4:], "big", True)  # SIGNED int
         sig_key = sha256(b"ldk" + local_seed + remote_seed + auth_hash)[:28]
 
-        # --- Encrypt and send command (same connection) ---
         import ucryptolib
         import struct
 
-        seq += 1
-        cmd = json.dumps({
-            "method": "set_device_info",
-            "params": {"device_on": True},
-        }).encode()
+        def encrypt_and_send(s, tapo_ip, cookie, key, iv, sig_key, seq, payload_dict):
+            """Encrypt a command and send it. Returns (seq, status, response_body)."""
+            seq += 1
+            cmd = json.dumps(payload_dict).encode()
 
-        # PKCS7 padding
-        pad_len = 16 - (len(cmd) % 16)
-        padded = cmd + bytes([pad_len] * pad_len)
+            # PKCS7 padding
+            pad_len = 16 - (len(cmd) % 16)
+            padded = cmd + bytes([pad_len] * pad_len)
 
-        # AES-128-CBC: IV = iv(12 bytes) + seq(4 bytes signed big-endian)
-        seq_bytes = struct.pack(">l", seq)
-        full_iv = iv + seq_bytes
+            # AES-128-CBC: IV = iv(12 bytes) + seq(4 bytes signed big-endian)
+            seq_bytes = struct.pack(">l", seq)
+            cipher_iv = iv + seq_bytes
 
-        cipher = ucryptolib.aes(key, 2, full_iv)
-        ciphertext = cipher.encrypt(padded)
+            cipher = ucryptolib.aes(key, 2, cipher_iv)
+            ciphertext = cipher.encrypt(padded)
 
-        # Signature: SHA256(sig_key + seq_bytes + ciphertext)
-        signature = sha256(sig_key + seq_bytes + ciphertext)
+            # Signature: SHA256(sig_key + seq_bytes + ciphertext)
+            signature = sha256(sig_key + seq_bytes + ciphertext)
 
-        # Wire format: signature(32) + ciphertext (NOT seq + ciphertext + sig)
-        request_body = signature + ciphertext
+            # Wire format: signature(32) + ciphertext
+            request_body = signature + ciphertext
 
-        status, headers, body = send_on_socket(
-            s, tapo_ip, f"/app/request?seq={seq}",
-            body=request_body,
-            headers={"Cookie": cookie},
+            status, headers, body = send_on_socket(
+                s, tapo_ip, f"/app/request?seq={seq}",
+                body=request_body,
+                headers={"Cookie": cookie},
+            )
+            return seq, status, body
+
+        def decrypt_response(key, iv, sig_key, seq, body):
+            """Decrypt a KLAP response body."""
+            if len(body) <= 32:
+                return None
+            ciphertext = body[32:]
+            seq_bytes = struct.pack(">l", seq)
+            cipher_iv = iv + seq_bytes
+            decipher = ucryptolib.aes(key, 2, cipher_iv)
+            padded = decipher.decrypt(ciphertext)
+            # Remove PKCS7 padding
+            pad_len = padded[-1]
+            plaintext = padded[:-pad_len]
+            return json.loads(plaintext)
+
+        # --- Check device state first ---
+        seq, status, body = encrypt_and_send(
+            s, tapo_ip, cookie, key, iv, sig_key, seq,
+            {"method": "get_device_info"}
+        )
+
+        if status == 200 and body:
+            info = decrypt_response(key, iv, sig_key, seq, body)
+            if info and info.get("result", {}).get("device_on"):
+                print("Tapo is already ON — skipping")
+                return True
+            else:
+                print("Tapo is OFF — turning on...")
+        else:
+            print(f"get_device_info failed (HTTP {status}), attempting turn on anyway...")
+
+        # --- Send turn ON command ---
+        seq, status, body = encrypt_and_send(
+            s, tapo_ip, cookie, key, iv, sig_key, seq,
+            {"method": "set_device_info", "params": {"device_on": True}}
         )
 
         if status == 200:
