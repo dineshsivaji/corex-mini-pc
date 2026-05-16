@@ -2,3 +2,19 @@ After updating the rtw89.conf file, better do the following and then reboot
 
 sudo update-initramfs -u
 sudo reboot
+
+
+
+
+To verify the config loaded for rtw89, check the below
+
+
+➜  ~ grep . /sys/module/rtw89_*_git/parameters/*
+/sys/module/rtw89_core_git/parameters/debug_mask:0
+/sys/module/rtw89_core_git/parameters/disable_ps_mode:Y
+/sys/module/rtw89_pci_git/parameters/disable_aspm_l1:N
+/sys/module/rtw89_pci_git/parameters/disable_aspm_l1ss:N
+/sys/module/rtw89_pci_git/parameters/disable_clkreq:N
+
+
+
