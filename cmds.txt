@@ -1,0 +1,4 @@
+After updating the rtw89.conf file, better do the following and then reboot
+
+sudo update-initramfs -u
+sudo reboot
