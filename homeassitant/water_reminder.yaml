@@ -1,0 +1,34 @@
+alias: Water Reminder
+description: ""
+triggers:
+  - trigger: time_pattern
+    hours: /2
+conditions:
+  - condition: time
+    after: "08:00:00"
+    before: "19:00:00"
+actions:
+  - action: media_player.volume_set
+    target:
+      entity_id: media_player.master_bedroom_speaker
+    data:
+      volume_level: 0.75
+  - delay: "00:00:02"
+  - action: tts.speak
+    metadata: {}
+    data:
+      cache: true
+      message: >-
+        Vennila, Surya, Chamathu Kutti, Kutti Chamathu, rendu perum konjam
+        thanni kudinga
+      media_player_entity_id: media_player.master_bedroom_speaker
+    target:
+      device_id: 44e40aee8226f9ebadd2edd156f1ef6b
+  - delay: "00:00:10"
+  - action: media_player.volume_set
+    target:
+      entity_id: media_player.master_bedroom_speaker
+    data:
+      volume_level: 0.4
+mode: single
+
