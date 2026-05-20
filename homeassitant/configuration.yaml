@@ -1,0 +1,25 @@
+
+# Loads default set of integrations. Do not remove.
+default_config:
+
+# Load frontend themes from the themes folder
+frontend:
+  themes: !include_dir_merge_named themes
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+media_dirs:
+  media: /config/media
+
+input_number:
+  water_voice_index:
+    name: Water Voice Index
+    min: 0
+    max: 3
+    step: 1
+  bathroom_voice_index:
+    name: Bathroom Voice Index
+    min: 0
+    max: 1
+    step: 1

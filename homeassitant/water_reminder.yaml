@@ -6,29 +6,22 @@ triggers:
 conditions:
   - condition: time
     after: "08:00:00"
-    before: "19:00:00"
+    before: "18:00:00"
 actions:
-  - action: media_player.volume_set
-    target:
-      entity_id: media_player.master_bedroom_speaker
+  - variables:
+      files:
+        - http://192.168.1.50:8123/local/audio/water_reminder_dinesh_voice.mp3
+        - http://192.168.1.50:8123/local/audio/water_reminder_rama_voice.mp3
+        - http://192.168.1.50:8123/local/audio/water_reminder_gomathi_voice.mp3
+        - http://192.168.1.50:8123/local/audio/water_reminder_sukanya_voice.mp3
+      index: "{{ states('input_number.water_voice_index') | int(0) }}"
+  - action: script.play_voice_message
     data:
-      volume_level: 0.75
-  - delay: "00:00:02"
-  - action: tts.speak
-    metadata: {}
-    data:
-      cache: true
-      message: >-
-        Vennila, Surya, Chamathu Kutti, Kutti Chamathu, rendu perum konjam
-        thanni kudinga
-      media_player_entity_id: media_player.master_bedroom_speaker
+      url: "{{ files[index % (files | length)] }}"
+  - action: input_number.set_value
     target:
-      device_id: 44e40aee8226f9ebadd2edd156f1ef6b
-  - delay: "00:00:10"
-  - action: media_player.volume_set
-    target:
-      entity_id: media_player.master_bedroom_speaker
+      entity_id: input_number.water_voice_index
     data:
-      volume_level: 0.4
+      value: "{{ (index + 1) % (files | length) }}"
 mode: single
 

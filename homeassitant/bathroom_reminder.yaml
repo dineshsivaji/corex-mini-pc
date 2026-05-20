@@ -1,0 +1,27 @@
+alias: Bathroom Reminder
+description: ""
+triggers:
+  - trigger: time_pattern
+    minutes: /30
+conditions:
+  - condition: time
+    after: "18:05:00"
+    before: "20:15:00"
+actions:
+  - variables:
+      files:
+        - >-
+          http://192.168.1.50:8123/local/audio/bathroom_reminder_subramanian_voice.mp3
+        - >-
+          http://192.168.1.50:8123/local/audio/bathroom_reminder_sukanya_voice.mp3
+      index: "{{ states('input_number.bathroom_voice_index') | int(0) }}"
+  - action: script.play_voice_message
+    data:
+      url: "{{ files[index % (files | length)] }}"
+  - action: input_number.set_value
+    target:
+      entity_id: input_number.bathroom_voice_index
+    data:
+      value: "{{ (index + 1) % (files | length) }}"
+mode: single
+

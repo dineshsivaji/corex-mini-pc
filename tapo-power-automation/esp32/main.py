@@ -1,14 +1,11 @@
 """
-ESP32 MicroPython boot script for power restoration.
+ESP32 MicroPython watchdog for power automation.
 
-When the grid returns and ESP32 powers on:
-1. Connects to WiFi
-2. Waits 60 seconds (guards against grid flicker)
-3. Sends "Turn ON" command to Tapo P110
-4. Goes idle (just responds to pings from Mini PC daemon)
+Continuously monitors the Mini PC via TCP connect (port 22).
+If the Mini PC is unreachable AND the Tapo plug is OFF, turns on the Tapo.
+Handles WiFi disconnections with blocking retry + machine reset.
 
-The Tapo P110 uses the KLAP protocol (firmware 1.3+). This script
-implements the minimal handshake needed to send a single "turn on" command.
+KLAP v2 protocol for Tapo P110 communication (single TCP connection required).
 """
 
 import network
@@ -17,50 +14,86 @@ import socket
 import hashlib
 import json
 import os
+import machine
+import struct
+import cryptolib
 
+# --- Configuration ---
+WIFI_SSID = "Airtel_Dinesh"
+WIFI_PASSWORD = "Anjaney@4"
 
-WIFI_SSID = "Wifi_Name"
-WIFI_PASSWORD = "Wifi_Pass"
+TAPO_IP = "192.168.1.110"
+TAPO_EMAIL = "007007dinesh@gmail.com"
+TAPO_PASSWORD = "DEayyE3s2pr@cUbM"
 
-TAPO_IP = "192.168.1.x"
-TAPO_EMAIL = "your_email"
-TAPO_PASSWORD = "your_pass"
-
+MINI_PC_IP = "192.168.1.50"
+MINI_PC_PORT = 22
 
 BOOT_DELAY_SEC = 60
+NORMAL_SLEEP_SEC = 180
+DEBOUNCE_SLEEP_SEC = 30
+POST_ACTION_SLEEP_SEC = 60
+FAILURE_THRESHOLD = 3
+WIFI_RETRY_INTERVAL = 10
+WIFI_MAX_RETRIES = 30  # 5 minutes
+
+# Pre-computed auth hash (constant for given credentials)
+AUTH_HASH = hashlib.sha256(
+    hashlib.sha1(TAPO_EMAIL.encode()).digest() +
+    hashlib.sha1(TAPO_PASSWORD.encode()).digest()
+).digest()
 
 
-def connect_wifi():
+# --- WiFi ---
+
+def ensure_wifi():
+    """Block until WiFi is connected. Reset after 5 minutes of failure."""
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
 
     if wlan.isconnected():
-        print(f"Already connected: {wlan.ifconfig()}")
-        return True
+        return
 
     print(f"Connecting to {WIFI_SSID}...")
     wlan.connect(WIFI_SSID, WIFI_PASSWORD)
 
-    timeout = 30
-    while not wlan.isconnected() and timeout > 0:
-        time.sleep(1)
-        timeout -= 1
+    retries = 0
+    while not wlan.isconnected():
+        time.sleep(WIFI_RETRY_INTERVAL)
+        retries += 1
+        if retries >= WIFI_MAX_RETRIES:
+            print("WiFi failed for 5 minutes. Resetting...")
+            machine.reset()
 
-    if wlan.isconnected():
-        print(f"Connected: {wlan.ifconfig()}")
+    print(f"Connected: {wlan.ifconfig()}")
+
+
+# --- Host check ---
+
+def check_host(ip, port=22, timeout=3):
+    """TCP connect check. Returns True if host is reachable."""
+    try:
+        addr = socket.getaddrinfo(ip, port)[0][-1]
+        s = socket.socket()
+        s.settimeout(timeout)
+        s.connect(addr)
+        s.close()
         return True
-    else:
-        print("WiFi connection failed")
+    except:
+        try:
+            s.close()
+        except:
+            pass
         return False
 
 
-def sha1(data):
-    return hashlib.sha1(data).digest()
-
+# --- Crypto helpers ---
 
 def sha256(data):
     return hashlib.sha256(data).digest()
 
+
+# --- HTTP over persistent socket ---
 
 def parse_http_response(raw):
     """Parse HTTP response into status code, headers dict, and body."""
@@ -72,8 +105,7 @@ def parse_http_response(raw):
     body = raw[header_end + 4:]
 
     lines = header_part.split(b"\r\n")
-    status_line = lines[0]
-    status_code = int(status_line.split(b" ")[1])
+    status_code = int(lines[0].split(b" ")[1])
 
     headers = {}
     for line in lines[1:]:
@@ -88,11 +120,10 @@ def parse_http_response(raw):
     return status_code, headers, body
 
 
-def read_response(s, content_length=None):
+def read_response(s):
     """Read HTTP response from a keep-alive socket."""
     response = b""
 
-    # Read until we have full headers
     while b"\r\n\r\n" not in response:
         chunk = s.recv(1024)
         if not chunk:
@@ -100,24 +131,25 @@ def read_response(s, content_length=None):
         response += chunk
 
     header_end = response.find(b"\r\n\r\n")
+    if header_end == -1:
+        return 0, {}, b""
+
     headers_raw = response[:header_end]
     body = response[header_end + 4:]
 
-    # Get content-length from headers
     cl = 0
     for line in headers_raw.split(b"\r\n"):
         if line.lower().startswith(b"content-length"):
             cl = int(line.split(b": ")[1])
             break
 
-    # Read remaining body
     while len(body) < cl:
         chunk = s.recv(1024)
         if not chunk:
             break
         body += chunk
 
-    return parse_http_response(response[:header_end] + b"\r\n\r\n" + body[:cl])
+    return parse_http_response(headers_raw + b"\r\n\r\n" + body[:cl])
 
 
 def send_on_socket(s, host, path, body=b"", headers=None):
@@ -125,9 +157,7 @@ def send_on_socket(s, host, path, body=b"", headers=None):
     if headers is None:
         headers = {}
 
-    req = f"POST {path} HTTP/1.1\r\n"
-    req += f"Host: {host}\r\n"
-    req += f"Content-Length: {len(body)}\r\n"
+    req = f"POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {len(body)}\r\n"
     for k, v in headers.items():
         req += f"{k}: {v}\r\n"
     req += "\r\n"
@@ -136,189 +166,230 @@ def send_on_socket(s, host, path, body=b"", headers=None):
     return read_response(s)
 
 
-def send_turn_on(tapo_ip, email, password):
-    """Send turn-on command to Tapo device via KLAP v2 (single TCP connection)."""
-    local_seed = os.urandom(16)
-    auth_hash = sha256(sha1(email.encode()) + sha1(password.encode()))
+# --- KLAP v2 session ---
 
-    # Open ONE persistent connection for the entire session
+def klap_session(tapo_ip):
+    """
+    Establish a KLAP v2 session with the Tapo device.
+    Returns (socket, cookie, key, iv, sig_key, seq) or None on failure.
+    """
+    local_seed = os.urandom(16)
+
     addr = socket.getaddrinfo(tapo_ip, 80)[0][-1]
     s = socket.socket()
     s.settimeout(10)
-    s.connect(addr)
 
     try:
-        # --- Handshake 1 ---
+        s.connect(addr)
+
+        # Handshake 1
         status, headers, body = send_on_socket(s, tapo_ip, "/app/handshake1", body=local_seed)
         if status != 200:
-            print(f"Handshake1 failed: HTTP {status}")
-            return False
+            s.close()
+            return None
 
         # Extract TP_SESSIONID cookie
         cookie = ""
         cookie_header = headers.get(b"set-cookie", b"")
         if cookie_header:
-            parts = cookie_header.decode().split(",")
-            for part in parts:
+            for part in cookie_header.decode().split(","):
                 part = part.strip()
                 if "TP_SESSIONID" in part:
                     cookie = part.split(";")[0]
                     break
 
-        if not cookie:
-            print("No TP_SESSIONID cookie")
-            return False
-
-        print(f"Handshake1 OK, cookie: {cookie[:20]}...")
-
-        if len(body) < 48:
-            print(f"Handshake1 body too short: {len(body)} bytes")
-            return False
+        if not cookie or len(body) < 48:
+            s.close()
+            return None
 
         remote_seed = body[:16]
         server_hash = body[16:48]
 
         # Verify server hash
-        expected = sha256(local_seed + remote_seed + auth_hash)
-        if server_hash != expected:
-            print("Server hash mismatch")
-            return False
+        if server_hash != sha256(local_seed + remote_seed + AUTH_HASH):
+            s.close()
+            return None
 
-        print("Server hash verified OK")
-
-        # --- Handshake 2 (same connection) ---
-        hs2_payload = sha256(remote_seed + local_seed + auth_hash)
+        # Handshake 2
+        hs2_payload = sha256(remote_seed + local_seed + AUTH_HASH)
         status, headers, body = send_on_socket(
             s, tapo_ip, "/app/handshake2",
             body=hs2_payload,
             headers={"Cookie": cookie},
         )
         if status != 200:
-            print(f"Handshake2 failed: HTTP {status}")
-            return False
+            s.close()
+            return None
 
-        print("Handshake2 OK — session established")
-
-        # --- Derive keys ---
-        key = sha256(b"lsk" + local_seed + remote_seed + auth_hash)[:16]
-        full_iv = sha256(b"iv" + local_seed + remote_seed + auth_hash)
+        # Derive keys
+        key = sha256(b"lsk" + local_seed + remote_seed + AUTH_HASH)[:16]
+        full_iv = sha256(b"iv" + local_seed + remote_seed + AUTH_HASH)
         iv = full_iv[:12]
-        seq = int.from_bytes(full_iv[-4:], "big", True)  # SIGNED int
-        sig_key = sha256(b"ldk" + local_seed + remote_seed + auth_hash)[:28]
+        seq = int.from_bytes(full_iv[-4:], "big", True)
+        sig_key = sha256(b"ldk" + local_seed + remote_seed + AUTH_HASH)[:28]
 
-        import ucryptolib
-        import struct
+        return s, cookie, key, iv, sig_key, seq
 
-        def encrypt_and_send(s, tapo_ip, cookie, key, iv, sig_key, seq, payload_dict):
-            """Encrypt a command and send it. Returns (seq, status, response_body)."""
-            seq += 1
-            cmd = json.dumps(payload_dict).encode()
+    except:
+        s.close()
+        return None
 
-            # PKCS7 padding
-            pad_len = 16 - (len(cmd) % 16)
-            padded = cmd + bytes([pad_len] * pad_len)
 
-            # AES-128-CBC: IV = iv(12 bytes) + seq(4 bytes signed big-endian)
-            seq_bytes = struct.pack(">l", seq)
-            cipher_iv = iv + seq_bytes
+def klap_request(s, tapo_ip, cookie, key, iv, sig_key, seq, payload_dict):
+    """Encrypt and send a KLAP command. Returns (seq, status, decrypted_response)."""
+    seq += 1
+    cmd = json.dumps(payload_dict).encode()
 
-            cipher = ucryptolib.aes(key, 2, cipher_iv)
-            ciphertext = cipher.encrypt(padded)
+    pad_len = 16 - (len(cmd) % 16)
+    padded = cmd + bytes([pad_len] * pad_len)
 
-            # Signature: SHA256(sig_key + seq_bytes + ciphertext)
-            signature = sha256(sig_key + seq_bytes + ciphertext)
+    seq_bytes = struct.pack(">l", seq)
+    cipher = cryptolib.aes(key, 2, iv + seq_bytes)
+    ciphertext = cipher.encrypt(padded)
 
-            # Wire format: signature(32) + ciphertext
-            request_body = signature + ciphertext
+    signature = sha256(sig_key + seq_bytes + ciphertext)
+    request_body = signature + ciphertext
 
-            status, headers, body = send_on_socket(
-                s, tapo_ip, f"/app/request?seq={seq}",
-                body=request_body,
-                headers={"Cookie": cookie},
+    status, headers, body = send_on_socket(
+        s, tapo_ip, f"/app/request?seq={seq}",
+        body=request_body,
+        headers={"Cookie": cookie},
+    )
+
+    # Decrypt response if present
+    response = None
+    if status == 200 and len(body) > 32:
+        resp_ciphertext = body[32:]
+        decipher = cryptolib.aes(key, 2, iv + seq_bytes)
+        decrypted = decipher.decrypt(resp_ciphertext)
+        pad = decrypted[-1]
+        response = json.loads(decrypted[:-pad])
+
+    return seq, status, response
+
+
+# --- Tapo control ---
+
+def check_tapo_state(tapo_ip):
+    """Check if Tapo is ON. Returns True/False/None (on error). Retries once."""
+    for _ in range(2):
+        session = klap_session(tapo_ip)
+        if not session:
+            time.sleep(3)
+            continue
+
+        s, cookie, key, iv, sig_key, seq = session
+        try:
+            seq, status, response = klap_request(
+                s, tapo_ip, cookie, key, iv, sig_key, seq,
+                {"method": "get_device_info"}
             )
-            return seq, status, body
+            if status == 200 and response:
+                return response.get("result", {}).get("device_on", False)
+        finally:
+            s.close()
+        time.sleep(3)
 
-        def decrypt_response(key, iv, sig_key, seq, body):
-            """Decrypt a KLAP response body."""
-            if len(body) <= 32:
-                return None
-            ciphertext = body[32:]
-            seq_bytes = struct.pack(">l", seq)
-            cipher_iv = iv + seq_bytes
-            decipher = ucryptolib.aes(key, 2, cipher_iv)
-            padded = decipher.decrypt(ciphertext)
-            # Remove PKCS7 padding
-            pad_len = padded[-1]
-            plaintext = padded[:-pad_len]
-            return json.loads(plaintext)
+    return None
 
-        # --- Check device state first ---
-        seq, status, body = encrypt_and_send(
-            s, tapo_ip, cookie, key, iv, sig_key, seq,
-            {"method": "get_device_info"}
-        )
 
-        if status == 200 and body:
-            info = decrypt_response(key, iv, sig_key, seq, body)
-            if info and info.get("result", {}).get("device_on"):
-                print("Tapo is already ON — skipping")
-                return True
-            else:
-                print("Tapo is OFF — turning on...")
-        else:
-            print(f"get_device_info failed (HTTP {status}), attempting turn on anyway...")
+def turn_on_tapo(tapo_ip):
+    """Turn on the Tapo plug. Returns True on success."""
+    session = klap_session(tapo_ip)
+    if not session:
+        print("  KLAP session failed")
+        return False
 
-        # --- Send turn ON command ---
-        seq, status, body = encrypt_and_send(
+    s, cookie, key, iv, sig_key, seq = session
+    try:
+        seq, status, response = klap_request(
             s, tapo_ip, cookie, key, iv, sig_key, seq,
             {"method": "set_device_info", "params": {"device_on": True}}
         )
-
         if status == 200:
-            print("Tapo turned ON successfully!")
+            print("  Tapo turned ON!")
             return True
         else:
-            print(f"Request failed: HTTP {status}")
+            print(f"  Turn ON failed: HTTP {status}")
             return False
-
     finally:
         s.close()
 
 
-def main():
-    if not connect_wifi():
-        print("Cannot proceed without WiFi. Resetting in 30s...")
-        time.sleep(30)
-        import machine
-        machine.reset()
+# --- Main watchdog loop ---
 
-    print(f"Waiting {BOOT_DELAY_SEC}s before sending Tapo ON (grid flicker guard)...")
+def main():
+    ensure_wifi()
+
+    print(f"Boot delay: waiting {BOOT_DELAY_SEC}s (grid flicker guard)...")
     time.sleep(BOOT_DELAY_SEC)
 
-    # Verify WiFi is still connected (grid didn't flicker)
+    # Verify WiFi survived the delay
     wlan = network.WLAN(network.STA_IF)
     if not wlan.isconnected():
-        print("WiFi lost during delay — grid likely flickered. Resetting...")
-        import machine
+        print("WiFi lost during boot delay. Resetting...")
         machine.reset()
 
-    # Retry up to 3 times
-    for attempt in range(3):
-        print(f"Attempt {attempt + 1}: Sending Tapo ON command...")
-        if send_turn_on(TAPO_IP, TAPO_EMAIL, TAPO_PASSWORD):
-            break
-        time.sleep(5)
-    else:
-        print("All attempts failed")
+    print("Entering watchdog loop...")
+    consecutive_failures = 0
 
-    # Go idle — just stay connected for ping responses
-    print("Entering idle mode (responding to pings)...")
     while True:
-        time.sleep(300)
-        # Periodic WiFi check
-        if not wlan.isconnected():
-            print("WiFi disconnected, reconnecting...")
-            connect_wifi()
+        # Ensure WiFi is up
+        if not network.WLAN(network.STA_IF).isconnected():
+            print("WiFi disconnected. Reconnecting...")
+            ensure_wifi()
+
+        # Check Mini PC
+        if check_host(MINI_PC_IP, MINI_PC_PORT):
+            if consecutive_failures > 0:
+                print(f"Mini PC back online (was down for {consecutive_failures} checks)")
+            else:
+                print("Mini PC is UP")
+            consecutive_failures = 0
+            time.sleep(NORMAL_SLEEP_SEC)
+
+        else:
+            consecutive_failures += 1
+            print(f"Mini PC unreachable ({consecutive_failures}/{FAILURE_THRESHOLD})")
+
+            if consecutive_failures < FAILURE_THRESHOLD:
+                time.sleep(DEBOUNCE_SLEEP_SEC)
+                continue
+
+            # Threshold reached — check Tapo state
+            print("Checking Tapo state...")
+            tapo_on = check_tapo_state(TAPO_IP)
+
+            if tapo_on is True:
+                print("Tapo is ON, Mini PC may be booting. Waiting...")
+                consecutive_failures = 0
+                time.sleep(NORMAL_SLEEP_SEC)
+                continue
+
+            if tapo_on is None:
+                if consecutive_failures > FAILURE_THRESHOLD + 5:
+                    print("Could not reach Tapo after multiple tries. Backing off...")
+                    consecutive_failures = 0
+                    time.sleep(NORMAL_SLEEP_SEC)
+                else:
+                    print("Could not reach Tapo, will retry...")
+                    time.sleep(DEBOUNCE_SLEEP_SEC)
+                continue
+
+            # Tapo is OFF + Mini PC is down → turn on
+            print("Mini PC down + Tapo OFF → turning ON Tapo")
+            for attempt in range(3):
+                print(f"  Attempt {attempt + 1}/3...")
+                if turn_on_tapo(TAPO_IP):
+                    break
+                time.sleep(5)
+            else:
+                print("  All attempts failed")
+
+            # Reset counter and give Mini PC time to boot
+            consecutive_failures = 0
+            print("Waiting for Mini PC to boot...")
+            time.sleep(NORMAL_SLEEP_SEC)
 
 
 main()
