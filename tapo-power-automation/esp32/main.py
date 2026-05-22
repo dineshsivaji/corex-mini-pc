@@ -19,12 +19,12 @@ import struct
 import cryptolib
 
 # --- Configuration ---
-WIFI_SSID = "Airtel_Dinesh"
-WIFI_PASSWORD = "Anjaney@4"
+WIFI_SSID = "wifi_ssd"
+WIFI_PASSWORD = "wifi_pass"
 
 TAPO_IP = "192.168.1.110"
-TAPO_EMAIL = "007007dinesh@gmail.com"
-TAPO_PASSWORD = "DEayyE3s2pr@cUbM"
+TAPO_EMAIL = "email"
+TAPO_PASSWORD = "pass"
 
 MINI_PC_IP = "192.168.1.50"
 MINI_PC_PORT = 22

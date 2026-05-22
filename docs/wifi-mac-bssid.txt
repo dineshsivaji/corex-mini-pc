@@ -1,0 +1,103 @@
+
+➜  ~ ls /etc/NetworkManager/system-connections/
+➜  ~ nmcli -f IN-USE,BSSID,SSID,SIGNAL device wifi
+IN-USE  BSSID              SSID                SIGNAL
+        6E:4F:89:CE:73:20  --                  100
+*       6C:4F:89:CE:73:20  Airtel_Dinesh_5GHz  81
+        6E:4F:89:B0:A9:B7  --                  20
+        6C:4F:89:B0:A9:B7  Airtel_nare_8505    19
+➜  ~
+➜  ~
+➜  ~
+➜  ~
+➜  ~ vim /mnt/storage/corex-mini-pc/wifi-mac-bssid.txt
+➜  ~ nmcli connection show
+NAME                UUID                                  TYPE      DEVICE
+Airtel_Dinesh_5GHz  d67ed3b4-2322-4b1d-b6b5-9b76fb0d710b  wifi      wlp3s0
+br-0204f21e05b1     a11fa69a-4e49-4626-9b9a-8844ca2df0dd  bridge    br-0204f21e05b1
+br-b1a51f465e89     69d3c644-0fef-48d8-8a28-4ce51547fc68  bridge    br-b1a51f465e89
+lo                  5db4ac32-ab63-465b-b8fd-eca49a52d70f  loopback  lo
+docker0             3e7dcec1-53a8-458a-a701-f59e1821d7b5  bridge    docker0
+netplan-enp2s0      7ea6f90b-3495-3533-948a-ef0035687c34  ethernet  --
+➜  ~ iw dev wlp3s0 link
+Connected to 6c:4f:89:ce:73:20 (on wlp3s0)
+        SSID: Airtel_Dinesh_5GHz
+        freq: 5240.0
+        RX: 99261113 bytes (621009 packets)
+        TX: 73273707 bytes (57187 packets)
+        signal: -45 dBm
+        rx bitrate: 600.4 MBit/s 80MHz HE-MCS 11 HE-NSS 1 HE-GI 0 HE-DCM 0
+        tx bitrate: 648.5 MBit/s 80MHz HE-MCS 6 HE-NSS 2 HE-GI 0 HE-DCM 0
+        bss flags: short-slot-time
+        dtim period: 1
+        beacon int: 100
+➜  ~
+
+
+➜  ~ nmcli device wifi list
+IN-USE  BSSID              SSID                MODE   CHAN  RATE        SIGNAL  BARS  SECURITY
+        6E:4F:89:CE:73:20  --                  Infra  48    270 Mbit/s  99      ▂▄▆█  WPA2
+*       6C:4F:89:CE:73:20  Airtel_Dinesh_5GHz  Infra  48    270 Mbit/s  79      ▂▄▆_  WPA1 WPA2
+        6E:4F:89:B0:A9:B7  --                  Infra  48    270 Mbit/s  20      ▂___  WPA2
+        6C:4F:89:B0:A9:B7  Airtel_nare_8505    Infra  48    270 Mbit/s  20      ▂___  WPA1 WPA2
+
+
+
+
+nmcli connection modify "Airtel_Dinesh_5GHz" 802-11-wireless.bssid 6C:4F:89:CE:73:20
+
+
+
+➜  ~ nmcli connection  show Airtel_Dinesh_5GHz | grep bssid
+802-11-wireless.bssid:                  6C:4F:89:CE:73:20
+802-11-wireless.seen-bssids:            6C:4F:89:CE:73:20
+
+
+
+sleep 60 && nmcli connection up "Airtel_Dinesh_5GHz" & 
+nmcli connection down "Airtel_Dinesh_5GHz"
+
+
+
+
+➜  ~ sudo nmcli connection modify "Airtel_Dinesh_5GHz" 802-11-wireless.prohibit-scanning yes
+Error: invalid property 'prohibit-scanning': 'prohibit-scanning' not among [ssid, mode, band, channel, bssid, mac-address, cloned-mac-address, generate-mac-address-mask, mac-address-blacklist, mac-address-denylist, mac-address-randomization, mtu, seen-bssids, hidden, powersave, wake-on-wlan, ap-isolation, channel-width].
+➜  ~
+
+
+nmcli connection modify Airtel_Dinesh_5GHz \
+  802-11-wireless.mac-address-randomization 0
+
+
+
+
+cat /etc/wpa_supplicant/wpa_supplicant.conf
+
+disable_scan_offload=1
+
+
+
+
+modinfo rtw89_core_git | grep parm
+
+
+
+
+➜  ~ modinfo rtw89_pci_git | grep parm
+parm:           disable_clkreq:Set Y to disable PCI clkreq support (bool)
+parm:           disable_aspm_l1:Set Y to disable PCI ASPM L1 support (bool)
+parm:           disable_aspm_l1ss:Set Y to disable PCI L1SS support (bool)
+➜  ~ modinfo rtw89_usb_git | grep parm
+parm:           switch_usb_mode:Set to N to disable switching to USB 3 mode to avoid potential interference in the 2.4 GHz band (default: Y) (bool)
+➜  ~ modinfo rtw89_core_git | grep parm
+parm:           debug_mask:Debugging mask (uint)
+parm:           disable_ps_mode:Set Y to disable low power mode (bool)
+
+
+
+
+
+
+
+
+sudo dmesg -T -w | grep -E "rtw89|scan|offload|wlp3s0"
