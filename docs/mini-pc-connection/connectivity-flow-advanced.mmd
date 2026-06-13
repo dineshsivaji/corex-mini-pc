@@ -1,0 +1,37 @@
+graph TD
+    %% Main Utility Power Path (Non-UPS)
+    subgraph Utility_Power [Utility Power Line]
+        A[Power Socket] --> B[Extension Box 1]
+        B -->|Always Powered| C["ESP32<br>192.168.1.32"]
+        B -->|Always Powered| D["Zeb SP 110<br>192.168.1.110<br>(Power Beacon)"]
+    end
+
+    %% UPS Protected Core Infrastructure
+    subgraph UPS_Protected_Chain [UPS Battery Backed Line]
+        B --> E[UPS]
+        E -->|10 Min Battery Line| F["Tapo P110<br>192.168.1.111<br>(Smart Switch)"]
+        F --> G[Extension Box 2]
+        G --> H["Mini PC<br>192.168.1.50"]
+        G --> I[3.5 inch HDD]
+    end
+
+    %% Data & Monitoring Interconnects
+    H -.->|USB / Data Link| I
+    H -.->|1. Pings to detect Power Cut| D
+    H -.->|2. Sets 1-min Shutdown Timer| F
+    
+    C -.->|3. Pings to detect Server Down| H
+    C -.->|4. Verifies Power Recovery| D
+    C -.->|5. Sends Turn-ON Command| F
+
+    %% Custom High-Contrast Dark Theme Styling
+    classDef power fill:#2b2013,stroke:#ff9100,stroke-width:2px,color:#fff;
+    classDef ups fill:#132237,stroke:#00d2ff,stroke-width:2px,color:#fff;
+    classDef smart fill:#132d2f,stroke:#00f5d4,stroke-width:2px,color:#fff;
+    classDef storage fill:#2d171e,stroke:#ff3366,stroke-width:2px,color:#fff;
+    classDef basic fill:#1c1c1c,stroke:#888888,stroke-width:2px,color:#fff;
+    
+    class A,B,G power;
+    class E,F ups;
+    class C,D,H smart;
+    class I storage;

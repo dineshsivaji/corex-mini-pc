@@ -1,0 +1,21 @@
+flowchart TD
+
+%% Power Flow
+PS[Power Socket] --> EB1[Extension Box]
+EB1 --> ZEB[Zeb SP110\n192.168.1.110]
+EB1 --> ESP[ESP32\n192.168.1.32]
+EB1 --> UPS[UPS]
+UPS --> TAPO[Tapo P110\n192.168.1.111]
+TAPO --> EB2[Extension Box]
+EB2 --> PC[Mini PC\n192.168.1.50]
+EB2 --> HDD[3.5 inch HDD]
+
+%% Data / Control Flow
+PC -. ping .-> ZEB
+ESP -. ping .-> PC
+ESP -. check .-> ZEB
+ESP -. control .-> TAPO
+PC -. control (timer) .-> TAPO
+
+%% Dependency
+PC -. uses .-> HDD
