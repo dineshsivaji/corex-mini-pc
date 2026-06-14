@@ -16,7 +16,7 @@
       target:
         entity_id: input_datetime.esp32_last_seen
       data:
-        timestamp: "{{ now().timestamp() | int }}"
+        datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
   mode: single
 
 # 2. Alert if ESP32 hasn't been heard from in 3 hours.
@@ -36,7 +36,11 @@
         to: !secret whatsapp_phone
         message: >-
           ⚠️ ESP32 watchdog dead. Last seen
-          {{ states('input_datetime.esp32_last_seen') }}.
+          {{ as_timestamp(states('input_datetime.esp32_last_seen'))
+             | timestamp_custom('%Y-%m-%d %H:%M', false) }}
+          ({{ ((now().timestamp() -
+                as_timestamp(states('input_datetime.esp32_last_seen'))) / 3600)
+              | round(1) }}h ago).
   mode: single
 
 # 3. Mini PC daemon detected power cut and is initiating shutdown.
