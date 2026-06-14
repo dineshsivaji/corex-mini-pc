@@ -1,0 +1,110 @@
+# Power-automation HA automations.
+# Append the contents below to your automations.yaml (or use !include_dir_merge_list).
+# WhatsApp phone number is read from secrets.yaml as `whatsapp_phone`.
+
+# 1. ESP32 sends a heartbeat hourly. Update last-seen timestamp.
+- alias: ESP32 Heartbeat Receiver
+  description: Update last-seen timestamp on each ESP32 heartbeat.
+  triggers:
+    - trigger: webhook
+      webhook_id: esp32_heartbeat
+      allowed_methods:
+        - POST
+      local_only: true
+  actions:
+    - action: input_datetime.set_datetime
+      target:
+        entity_id: input_datetime.esp32_last_seen
+      data:
+        timestamp: "{{ now().timestamp() | int }}"
+  mode: single
+
+# 2. Alert if ESP32 hasn't been heard from in 3 hours.
+- alias: Dead ESP32 Alert
+  description: WhatsApp alert when ESP32 watchdog goes silent.
+  triggers:
+    - trigger: time_pattern
+      minutes: "/30"
+  conditions:
+    - condition: template
+      value_template: >-
+        {{ (now().timestamp() -
+            states('input_datetime.esp32_last_seen') | as_timestamp(0)) > 10800 }}
+  actions:
+    - action: shell_command.whatsapp_alert
+      data:
+        to: !secret whatsapp_phone
+        message: >-
+          ⚠️ ESP32 watchdog dead. Last seen
+          {{ states('input_datetime.esp32_last_seen') }}.
+  mode: single
+
+# 3. Mini PC daemon detected power cut and is initiating shutdown.
+- alias: Power Cut Imminent
+  description: WhatsApp alert when Mini PC starts shutdown sequence.
+  triggers:
+    - trigger: webhook
+      webhook_id: power_cut_imminent
+      allowed_methods:
+        - POST
+      local_only: true
+  actions:
+    - action: shell_command.whatsapp_alert
+      data:
+        to: !secret whatsapp_phone
+        message: >-
+          🔌 Power cut detected. Mini PC shutting down (Tapo cuts in 60s).
+  mode: single
+
+# 4. Mini PC daemon's Tapo countdown command failed.
+- alias: Tapo Command Failed
+  description: Alert when daemon could not set Tapo countdown.
+  triggers:
+    - trigger: webhook
+      webhook_id: tapo_command_failed
+      allowed_methods:
+        - POST
+      local_only: true
+  actions:
+    - action: shell_command.whatsapp_alert
+      data:
+        to: !secret whatsapp_phone
+        message: >-
+          ⚠️ Tapo countdown command FAILED. UPS may drain — Mini PC shutdown
+          will proceed but HDD power won't auto-cut.
+  mode: single
+
+# 5. ESP32 successfully turned Tapo back on after grid restoration.
+- alias: Power Restored
+  description: WhatsApp alert when ESP32 detects power back and turns on Tapo.
+  triggers:
+    - trigger: webhook
+      webhook_id: esp32_power_restored
+      allowed_methods:
+        - POST
+      local_only: true
+  actions:
+    - action: shell_command.whatsapp_alert
+      data:
+        to: !secret whatsapp_phone
+        message: >-
+          ✅ Power restored. Tapo turned ON, Mini PC booting.
+  mode: single
+
+# 6. Mini PC stays unreachable while Tapo is ON (boot failure / hung).
+- alias: Mini PC Stuck Alert
+  description: Alert when Tapo is on but Mini PC won't come up.
+  triggers:
+    - trigger: webhook
+      webhook_id: esp32_mini_pc_stuck
+      allowed_methods:
+        - POST
+      local_only: true
+  actions:
+    - action: shell_command.whatsapp_alert
+      data:
+        to: !secret whatsapp_phone
+        message: >-
+          ⚠️ Mini PC unreachable but Tapo is ON. Possible boot failure —
+          investigate.
+  mode: single

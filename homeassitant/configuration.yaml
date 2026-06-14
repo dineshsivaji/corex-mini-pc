@@ -23,3 +23,18 @@ input_number:
     min: 0
     max: 1
     step: 1
+
+# Power-automation: track last ESP32 heartbeat for dead-watchdog detection.
+input_datetime:
+  esp32_last_seen:
+    name: ESP32 Last Heartbeat
+    has_date: true
+    has_time: true
+
+# Generic WhatsApp sender. Pass `to` and `message` from automations.
+# Phone number lives in secrets.yaml as `whatsapp_phone` (not committed).
+shell_command:
+  whatsapp_alert: >-
+    curl -s -X POST http://localhost:3001/send
+    -H "Content-Type: application/json"
+    -d '{"to": "{{ to }}", "message": "{{ message }}"}'

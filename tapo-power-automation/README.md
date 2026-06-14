@@ -231,20 +231,68 @@ The signature (`SHA256(seq + ciphertext)`) provides integrity verification. The 
 ## Architecture: Power Automation System
 
 ```
-    [ MAIN UTILITY GRID ]
-             │
-             ├───► [ ESP32 ] (raw wall socket — dies on power cut)
-             │
-             └───► [ UPS ]
-                     │
-                     └───► [ Tapo P110 ] ───► [ Mini PC + HDDs ]
+┌─────────────────── UTILITY POWER LINE ──────────────────┐
+│                                                          │
+│   ESP32                  Zeb SP110 (power beacon)        │
+│   192.168.1.32           192.168.1.110                   │
+│   - watchdog             - reachable iff utility is up   │
+│   - turns Tapo back on                                   │
+│                                                          │
+│   WiFi router on its own UPS (~2 hr) → stays up          │
+└──────────────────────────────────────────────────────────┘
+
+┌─────────────────── UPS BATTERY-BACKED LINE ─────────────┐
+│   (~10 min runtime)                                      │
+│                                                          │
+│   Mini PC               Tapo P110              3.5" HDD  │
+│   192.168.1.50          192.168.1.111          /dev/sda  │
+│   - power_daemon        - cuts HDD power                 │
+│   - HA + Docker         - controlled by ESP32            │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
 ```
 
-**Normal operation:** Mini PC pings ESP32 every 60s.
+**Roles:**
 
-**Power failure:** ESP32 dies → Mini PC detects 10 minutes of failed pings → sets Tapo hardware countdown (120s to cut power) → shuts down gracefully → Tapo cuts power → UPS preserved.
+- **Zeb SP110** is the "power beacon": a smart switch on the utility
+  line that becomes unreachable the instant grid power drops. The Mini
+  PC's daemon pings it as the primary outage signal.
+- **Mini PC** owns the shutdown decision. When Zeb stays unreachable
+  for 5 minutes (with a gateway sanity check to rule out network
+  glitches), the daemon parks the HDD, stops Docker, sets a Tapo
+  countdown to cut power, and runs `shutdown -h now`.
+- **ESP32** owns the recovery decision. Once grid returns, the ESP32
+  (which never lost power) notices the Mini PC is unreachable and the
+  Tapo is OFF — it turns the Tapo back on. The Mini PC boots via BIOS
+  "Restore on AC Loss".
+- **Home Assistant** (also on the Mini PC) receives webhooks from both
+  sides and pushes WhatsApp notifications for every transition:
+  power cut detected, Tapo command failed, power restored,
+  Mini PC stuck on boot, ESP32 watchdog dead.
 
-**Power restored:** ESP32 boots → connects WiFi → waits 60s (flicker guard) → sends KLAP "turn ON" to Tapo → Mini PC boots via BIOS "Restore on AC Loss" setting.
+**Normal operation:**
+
+- Mini PC pings Zeb SP110 every 60s.
+- ESP32 pings Mini PC every 180s and sends an hourly heartbeat to HA.
+
+**Power failure:**
+
+```
+Zeb unreachable →
+Mini PC counts 5 min → gateway sanity check →
+WhatsApp alert → set Tapo countdown(60s) → stop docker →
+umount /mnt/storage → hdparm -Y /dev/sda → shutdown -h now
+                                              ↓
+                                  Tapo cuts power 60s later
+```
+
+**Power restored:**
+
+```
+Grid returns → Zeb reachable → Mini PC stays off (Tapo cut earlier) →
+ESP32 sees Mini PC down + Tapo OFF → ESP32 turns Tapo ON →
+Mini PC boots (BIOS "Restore on AC Loss") → WhatsApp alert
+```
 
 ---
 
@@ -253,15 +301,18 @@ The signature (`SHA256(seq + ciphertext)`) provides integrity verification. The 
 ```
 tapo-power-automation/
 ├── esp32/
-│   └── main.py                 # MicroPython: KLAP v2 implementation + boot logic
+│   └── main.py                     # MicroPython: KLAP v2 + watchdog +
+│                                   #   WDT + heartbeat + state webhooks
 ├── minipc/
-│   ├── power_daemon.py         # Python: ping monitor + shutdown orchestrator
-│   ├── power-daemon.service    # systemd unit
+│   ├── power_daemon.py             # Power-cut detection + shutdown orchestrator
+│   ├── power-daemon.service        # systemd unit (reads env file)
+│   ├── power-daemon.env.example    # Env template (copy to /etc/default/)
 │   └── requirements.txt
-├── test_klap.py                # Diagnostic: separate connections (demonstrates failure)
-├── test_klap_keepalive.py      # Diagnostic: persistent connection (demonstrates fix)
-├── SETUP.md                    # Deployment instructions
-└── README.md                   # This file
+├── tests/
+│   ├── test_klap.py                # Diagnostic: separate connections (failure)
+│   └── test_klap_keepalive.py      # Diagnostic: persistent connection (fix)
+├── SETUP.md                        # Deployment instructions
+└── README.md                       # This file
 ```
 
 ---

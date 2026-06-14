@@ -5,10 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+EnvironmentFile=-/etc/default/power-daemon
 ExecStart=/usr/bin/python3 /opt/power-daemon/power_daemon.py
 Restart=always
 RestartSec=10
-User=root
+User=hgd469
 
 [Install]
 WantedBy=multi-user.target

@@ -6,6 +6,18 @@ If the Mini PC is unreachable AND the Tapo plug is OFF, turns on the Tapo.
 Handles WiFi disconnections with blocking retry + machine reset.
 
 KLAP v2 protocol for Tapo P110 communication (single TCP connection required).
+
+Reliability features:
+- Hardware watchdog (machine.WDT) auto-resets on hang.
+- Tighter exception handling (OSError only, not bare except).
+- NTP-synced wall-clock timestamps in logs.
+- Direct tuple connect (skip DNS lookup for local IPs).
+
+Visibility (HA webhooks):
+- Hourly heartbeat → input_datetime.esp32_last_seen.
+- Notification on Tapo turn-on (power restored).
+- Notification when Mini PC stays down despite Tapo being ON for >10 min
+  (boot failure).
 """
 
 import network
@@ -17,17 +29,24 @@ import os
 import machine
 import struct
 import cryptolib
+import ntptime
+import urequests
 
 # --- Configuration ---
 WIFI_SSID = "wifi_ssd"
 WIFI_PASSWORD = "wifi_pass"
 
-TAPO_IP = "192.168.1.110"
+TAPO_IP = "192.168.1.111"
 TAPO_EMAIL = "email"
 TAPO_PASSWORD = "pass"
 
 MINI_PC_IP = "192.168.1.50"
 MINI_PC_PORT = 22
+
+HA_BASE_URL = "http://192.168.1.50:8123"
+HA_HEARTBEAT_URL = HA_BASE_URL + "/api/webhook/esp32_heartbeat"
+HA_POWER_RESTORED_URL = HA_BASE_URL + "/api/webhook/esp32_power_restored"
+HA_MINI_PC_STUCK_URL = HA_BASE_URL + "/api/webhook/esp32_mini_pc_stuck"
 
 BOOT_DELAY_SEC = 60
 NORMAL_SLEEP_SEC = 180
@@ -36,12 +55,35 @@ POST_ACTION_SLEEP_SEC = 60
 FAILURE_THRESHOLD = 3
 WIFI_RETRY_INTERVAL = 10
 WIFI_MAX_RETRIES = 30  # 5 minutes
+HEARTBEAT_INTERVAL_SEC = 3600  # 1 hour
+STUCK_ALERT_THRESHOLD_SEC = 600  # 10 min: Tapo ON + Mini PC down → boot failure
+WDT_TIMEOUT_MS = 120000  # 2 minutes
+NTP_RETRY_DELAY_SEC = 5
+IST_OFFSET_SEC = 5 * 3600 + 30 * 60  # India Standard Time = UTC+5:30
+WEBHOOK_TIMEOUT_SEC = 3
 
 # Pre-computed auth hash (constant for given credentials)
 AUTH_HASH = hashlib.sha256(
     hashlib.sha1(TAPO_EMAIL.encode()).digest() +
     hashlib.sha1(TAPO_PASSWORD.encode()).digest()
 ).digest()
+
+
+# --- Logging ---
+
+def _format_ts():
+    """Return [YYYY-MM-DD HH:MM:SS IST] timestamp string."""
+    try:
+        t = time.localtime(time.time() + IST_OFFSET_SEC)
+        return "[{:04d}-{:02d}-{:02d} {:02d}:{:02d}:{:02d} IST]".format(
+            t[0], t[1], t[2], t[3], t[4], t[5]
+        )
+    except Exception:
+        return "[ts?]"
+
+
+def log(msg):
+    print(_format_ts(), msg)
 
 
 # --- WiFi ---
@@ -54,7 +96,7 @@ def ensure_wifi():
     if wlan.isconnected():
         return
 
-    print(f"Connecting to {WIFI_SSID}...")
+    log("Connecting to {}...".format(WIFI_SSID))
     wlan.connect(WIFI_SSID, WIFI_PASSWORD)
 
     retries = 0
@@ -62,29 +104,43 @@ def ensure_wifi():
         time.sleep(WIFI_RETRY_INTERVAL)
         retries += 1
         if retries >= WIFI_MAX_RETRIES:
-            print("WiFi failed for 5 minutes. Resetting...")
+            log("WiFi failed for 5 minutes. Resetting...")
             machine.reset()
 
-    print(f"Connected: {wlan.ifconfig()}")
+    log("Connected: {}".format(wlan.ifconfig()))
+
+
+def sync_ntp():
+    """Sync RTC via NTP. Best-effort; logs and returns on failure."""
+    for attempt in range(3):
+        try:
+            ntptime.settime()
+            log("NTP sync OK ({})".format(_format_ts()))
+            return
+        except OSError as e:
+            log("NTP attempt {}/3 failed: {}".format(attempt + 1, e))
+            time.sleep(NTP_RETRY_DELAY_SEC)
+    log("NTP sync gave up; using boot-relative time")
 
 
 # --- Host check ---
 
 def check_host(ip, port=22, timeout=3):
-    """TCP connect check. Returns True if host is reachable."""
+    """TCP connect check. Returns True if host is reachable. No DNS lookup."""
+    s = None
     try:
-        addr = socket.getaddrinfo(ip, port)[0][-1]
         s = socket.socket()
         s.settimeout(timeout)
-        s.connect(addr)
-        s.close()
+        s.connect((ip, port))
         return True
-    except:
-        try:
-            s.close()
-        except:
-            pass
+    except OSError:
         return False
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
 
 
 # --- Crypto helpers ---
@@ -157,9 +213,11 @@ def send_on_socket(s, host, path, body=b"", headers=None):
     if headers is None:
         headers = {}
 
-    req = f"POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {len(body)}\r\n"
+    req = "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\n".format(
+        path, host, len(body)
+    )
     for k, v in headers.items():
-        req += f"{k}: {v}\r\n"
+        req += "{}: {}\r\n".format(k, v)
     req += "\r\n"
 
     s.send(req.encode() + body)
@@ -175,12 +233,11 @@ def klap_session(tapo_ip):
     """
     local_seed = os.urandom(16)
 
-    addr = socket.getaddrinfo(tapo_ip, 80)[0][-1]
     s = socket.socket()
     s.settimeout(10)
 
     try:
-        s.connect(addr)
+        s.connect((tapo_ip, 80))
 
         # Handshake 1
         status, headers, body = send_on_socket(s, tapo_ip, "/app/handshake1", body=local_seed)
@@ -230,8 +287,11 @@ def klap_session(tapo_ip):
 
         return s, cookie, key, iv, sig_key, seq
 
-    except:
-        s.close()
+    except OSError:
+        try:
+            s.close()
+        except OSError:
+            pass
         return None
 
 
@@ -251,7 +311,7 @@ def klap_request(s, tapo_ip, cookie, key, iv, sig_key, seq, payload_dict):
     request_body = signature + ciphertext
 
     status, headers, body = send_on_socket(
-        s, tapo_ip, f"/app/request?seq={seq}",
+        s, tapo_ip, "/app/request?seq={}".format(seq),
         body=request_body,
         headers={"Cookie": cookie},
     )
@@ -286,8 +346,13 @@ def check_tapo_state(tapo_ip):
             )
             if status == 200 and response:
                 return response.get("result", {}).get("device_on", False)
+        except OSError as e:
+            log("  KLAP get_device_info OSError: {}".format(e))
         finally:
-            s.close()
+            try:
+                s.close()
+            except OSError:
+                pass
         time.sleep(3)
 
     return None
@@ -297,7 +362,7 @@ def turn_on_tapo(tapo_ip):
     """Turn on the Tapo plug. Returns True on success."""
     session = klap_session(tapo_ip)
     if not session:
-        print("  KLAP session failed")
+        log("  KLAP session failed")
         return False
 
     s, cookie, key, iv, sig_key, seq = session
@@ -307,89 +372,173 @@ def turn_on_tapo(tapo_ip):
             {"method": "set_device_info", "params": {"device_on": True}}
         )
         if status == 200:
-            print("  Tapo turned ON!")
+            log("  Tapo turned ON!")
             return True
-        else:
-            print(f"  Turn ON failed: HTTP {status}")
-            return False
+        log("  Turn ON failed: HTTP {}".format(status))
+        return False
+    except OSError as e:
+        log("  Turn ON OSError: {}".format(e))
+        return False
     finally:
-        s.close()
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+# --- HA webhooks (fire-and-forget) ---
+
+def fire_webhook(url, payload):
+    """POST JSON to HA webhook. Best-effort; never raises."""
+    r = None
+    try:
+        r = urequests.post(
+            url,
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+            timeout=WEBHOOK_TIMEOUT_SEC,
+        )
+        return 200 <= r.status_code < 300
+    except Exception as e:
+        log("  Webhook {} failed: {}".format(url, e))
+        return False
+    finally:
+        if r is not None:
+            try:
+                r.close()
+            except Exception:
+                pass
+
+
+def send_heartbeat():
+    """Hourly heartbeat to HA. Includes uptime and WiFi RSSI."""
+    try:
+        wlan = network.WLAN(network.STA_IF)
+        rssi = wlan.status("rssi") if wlan.isconnected() else None
+    except Exception:
+        rssi = None
+
+    fire_webhook(
+        HA_HEARTBEAT_URL,
+        {"uptime_sec": time.time(), "wifi_rssi": rssi},
+    )
 
 
 # --- Main watchdog loop ---
 
 def main():
     ensure_wifi()
+    sync_ntp()
 
-    print(f"Boot delay: waiting {BOOT_DELAY_SEC}s (grid flicker guard)...")
+    log("Boot delay: waiting {}s (grid flicker guard)...".format(BOOT_DELAY_SEC))
     time.sleep(BOOT_DELAY_SEC)
 
     # Verify WiFi survived the delay
     wlan = network.WLAN(network.STA_IF)
     if not wlan.isconnected():
-        print("WiFi lost during boot delay. Resetting...")
+        log("WiFi lost during boot delay. Resetting...")
         machine.reset()
 
-    print("Entering watchdog loop...")
+    # Hardware watchdog: auto-reset if loop hangs > WDT_TIMEOUT_MS
+    wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
+
+    log("Entering watchdog loop...")
     consecutive_failures = 0
+    last_heartbeat = 0
+    stuck_since = 0  # timestamp when "Tapo on but Mini PC down" first observed
+    stuck_alerted = False
+
+    # Send initial heartbeat
+    send_heartbeat()
+    last_heartbeat = time.time()
 
     while True:
+        wdt.feed()
+
+        # Hourly heartbeat
+        if time.time() - last_heartbeat >= HEARTBEAT_INTERVAL_SEC:
+            send_heartbeat()
+            last_heartbeat = time.time()
+
         # Ensure WiFi is up
         if not network.WLAN(network.STA_IF).isconnected():
-            print("WiFi disconnected. Reconnecting...")
+            log("WiFi disconnected. Reconnecting...")
             ensure_wifi()
 
         # Check Mini PC
         if check_host(MINI_PC_IP, MINI_PC_PORT):
             if consecutive_failures > 0:
-                print(f"Mini PC back online (was down for {consecutive_failures} checks)")
+                log("Mini PC back online (was down for {} checks)".format(
+                    consecutive_failures))
             else:
-                print("Mini PC is UP")
+                log("Mini PC is UP")
+            consecutive_failures = 0
+            stuck_since = 0
+            stuck_alerted = False
+            time.sleep(NORMAL_SLEEP_SEC)
+            continue
+
+        consecutive_failures += 1
+        log("Mini PC unreachable ({}/{})".format(
+            consecutive_failures, FAILURE_THRESHOLD))
+
+        if consecutive_failures < FAILURE_THRESHOLD:
+            time.sleep(DEBOUNCE_SLEEP_SEC)
+            continue
+
+        # Threshold reached — check Tapo state
+        log("Checking Tapo state...")
+        tapo_on = check_tapo_state(TAPO_IP)
+
+        if tapo_on is True:
+            # Smart detection: Tapo is ON, so Mini PC is rebooting / hung,
+            # not powered off. Don't turn anything on.
+            now = time.time()
+            if stuck_since == 0:
+                stuck_since = now
+                log("Tapo is ON but Mini PC down — assume rebooting; tracking.")
+            elif (now - stuck_since) >= STUCK_ALERT_THRESHOLD_SEC and not stuck_alerted:
+                log("Mini PC stuck for {}s while Tapo ON → alerting HA".format(
+                    int(now - stuck_since)))
+                fire_webhook(HA_MINI_PC_STUCK_URL, {
+                    "stuck_for_sec": int(now - stuck_since),
+                })
+                stuck_alerted = True
             consecutive_failures = 0
             time.sleep(NORMAL_SLEEP_SEC)
+            continue
 
-        else:
-            consecutive_failures += 1
-            print(f"Mini PC unreachable ({consecutive_failures}/{FAILURE_THRESHOLD})")
-
-            if consecutive_failures < FAILURE_THRESHOLD:
-                time.sleep(DEBOUNCE_SLEEP_SEC)
-                continue
-
-            # Threshold reached — check Tapo state
-            print("Checking Tapo state...")
-            tapo_on = check_tapo_state(TAPO_IP)
-
-            if tapo_on is True:
-                print("Tapo is ON, Mini PC may be booting. Waiting...")
+        if tapo_on is None:
+            if consecutive_failures > FAILURE_THRESHOLD + 5:
+                log("Could not reach Tapo after multiple tries. Backing off...")
                 consecutive_failures = 0
                 time.sleep(NORMAL_SLEEP_SEC)
-                continue
-
-            if tapo_on is None:
-                if consecutive_failures > FAILURE_THRESHOLD + 5:
-                    print("Could not reach Tapo after multiple tries. Backing off...")
-                    consecutive_failures = 0
-                    time.sleep(NORMAL_SLEEP_SEC)
-                else:
-                    print("Could not reach Tapo, will retry...")
-                    time.sleep(DEBOUNCE_SLEEP_SEC)
-                continue
-
-            # Tapo is OFF + Mini PC is down → turn on
-            print("Mini PC down + Tapo OFF → turning ON Tapo")
-            for attempt in range(3):
-                print(f"  Attempt {attempt + 1}/3...")
-                if turn_on_tapo(TAPO_IP):
-                    break
-                time.sleep(5)
             else:
-                print("  All attempts failed")
+                log("Could not reach Tapo, will retry...")
+                time.sleep(DEBOUNCE_SLEEP_SEC)
+            continue
 
-            # Reset counter and give Mini PC time to boot
-            consecutive_failures = 0
-            print("Waiting for Mini PC to boot...")
-            time.sleep(NORMAL_SLEEP_SEC)
+        # Tapo is OFF + Mini PC is down → turn on
+        log("Mini PC down + Tapo OFF → turning ON Tapo")
+        turn_on_success = False
+        for attempt in range(3):
+            log("  Attempt {}/3...".format(attempt + 1))
+            if turn_on_tapo(TAPO_IP):
+                turn_on_success = True
+                break
+            time.sleep(5)
+        else:
+            log("  All attempts failed")
+
+        if turn_on_success:
+            fire_webhook(HA_POWER_RESTORED_URL, {"action": "tapo_turned_on"})
+
+        # Reset counter and give Mini PC time to boot
+        consecutive_failures = 0
+        stuck_since = 0
+        stuck_alerted = False
+        log("Waiting for Mini PC to boot...")
+        time.sleep(NORMAL_SLEEP_SEC)
 
 
 main()
