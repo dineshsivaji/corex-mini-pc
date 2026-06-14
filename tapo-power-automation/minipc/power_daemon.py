@@ -70,7 +70,7 @@ class Config:
     ping_interval_sec: int = 60
     failure_threshold_sec: int = 300  # 5 minutes
     tapo_countdown_sec: int = 60
-    ping_timeout_sec: int = 5
+    ping_timeout_sec: int = 10
     webhook_timeout_sec: int = 2
 
 
