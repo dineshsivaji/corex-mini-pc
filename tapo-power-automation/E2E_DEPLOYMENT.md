@@ -44,13 +44,17 @@ step 1.4.
 
 ## Phase 1 — Mini PC daemon deployment
 
-### 1.1 Install dependencies
+### 1.1 Install system dependencies
 
 ```bash
 sudo apt update
-sudo apt install -y hdparm python3-pip
-sudo pip3 install python-kasa
+sudo apt install -y hdparm python3-venv
 ```
+
+`python3-venv` is needed to create the virtual environment in step 1.4.
+We deliberately do **not** install `python-kasa` system-wide — it goes
+into a dedicated venv to avoid polluting the system Python and to
+sidestep PEP 668 ("externally-managed-environment") on Ubuntu 24.04+.
 
 ### 1.2 Stop existing daemon (if running)
 
@@ -68,7 +72,38 @@ sudo cp tapo-power-automation/minipc/power-daemon.service /etc/systemd/system/
 sudo chmod 755 /opt/power-daemon/power_daemon.py
 ```
 
-### 1.4 Create env file with real credentials
+### 1.4 Create dedicated venv and install python-kasa
+
+```bash
+sudo python3 -m venv /opt/power-daemon/venv
+sudo /opt/power-daemon/venv/bin/pip install --upgrade pip
+sudo /opt/power-daemon/venv/bin/pip install \
+  -r tapo-power-automation/minipc/requirements.txt
+```
+
+Verify the install:
+
+```bash
+sudo /opt/power-daemon/venv/bin/python -c "from kasa import Discover; print('OK')"
+```
+
+Should print `OK`.
+
+To upgrade `python-kasa` later:
+
+```bash
+sudo /opt/power-daemon/venv/bin/pip install --upgrade python-kasa
+sudo systemctl restart power-daemon
+```
+
+To wipe and rebuild the venv:
+
+```bash
+sudo rm -rf /opt/power-daemon/venv
+# then repeat step 1.4
+```
+
+### 1.5 Create env file with real credentials
 
 ```bash
 sudo cp tapo-power-automation/minipc/power-daemon.env.example /etc/default/power-daemon
@@ -87,7 +122,7 @@ POWER_DAEMON_STORAGE_MOUNT=/mnt/storage     # adjust if needed
 # Other defaults are fine
 ```
 
-### 1.5 Configure sudoers (passwordless privileged commands)
+### 1.6 Configure sudoers (passwordless privileged commands)
 
 ```bash
 sudo visudo -f /etc/sudoers.d/power-daemon
@@ -105,7 +140,7 @@ hgd469 ALL=(ALL) NOPASSWD: /usr/bin/umount /mnt/storage
 (Save: `Ctrl+O`, `Enter`, `Ctrl+X`.) `visudo` refuses to save bad
 syntax — if you exit cleanly, it parsed fine.
 
-### 1.6 Update fstab for non-blocking HDD mount
+### 1.7 Update fstab for non-blocking HDD mount
 
 ```bash
 sudo cp /etc/fstab /etc/fstab.bak
@@ -119,17 +154,16 @@ Find the `/mnt/storage` line and ensure options include
 UUID=xxxx /mnt/storage ext4 defaults,nofail,x-systemd.device-timeout=60s 0 2
 ```
 
-### 1.7 Verify daemon imports cleanly
+### 1.8 Verify daemon imports cleanly
 
 ```bash
-sudo -u hgd469 python3 -c \
+sudo -u hgd469 /opt/power-daemon/venv/bin/python -c \
   "import sys; sys.path.insert(0, '/opt/power-daemon'); import power_daemon; print('OK')"
 ```
 
-Should print `OK`. If kasa import fails, run
-`sudo pip3 install python-kasa` again.
+Should print `OK`. If kasa import fails, re-run step 1.4.
 
-### 1.8 Start the daemon
+### 1.9 Start the daemon
 
 ```bash
 sudo systemctl daemon-reload
@@ -140,7 +174,7 @@ sudo systemctl status power-daemon
 
 Status should show `active (running)`.
 
-### 1.9 Watch logs — verify it's pinging Zeb
+### 1.10 Watch logs — verify it's pinging Zeb
 
 ```bash
 sudo journalctl -u power-daemon -f
