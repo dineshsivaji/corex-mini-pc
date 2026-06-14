@@ -1,0 +1,15 @@
+[Unit]
+Description=Wait for /mnt/storage to be mounted
+DefaultDependencies=yes
+After=local-fs.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/wait-for-mount.sh /mnt/storage 120
+RemainAfterExit=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
