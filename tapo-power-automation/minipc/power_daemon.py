@@ -70,22 +70,34 @@ class Config:
     ping_interval_sec: int = 60
     failure_threshold_sec: int = 300  # 5 minutes
     tapo_countdown_sec: int = 60
-    ping_timeout_sec: int = 10
+    ping_timeout_sec: int = 5
+    ping_packet_count: int = 5  # Multiple packets to handle flaky WiFi smart plugs
     webhook_timeout_sec: int = 2
 
 
 # --- Network checks ---
 
 
-async def ping(ip: str, timeout: int) -> bool:
-    """ICMP ping. Returns True if host responds within timeout."""
+async def ping(ip: str, timeout: int, count: int = 1) -> bool:
+    """
+    ICMP ping. Returns True if at least one of `count` packets gets a reply.
+
+    Sending multiple packets handles WiFi-power-saved smart plugs that miss
+    the first ICMP (radio is asleep) but respond to subsequent ones.
+    Uses 0.5s interval to keep total time bounded (~count*0.5s + timeout).
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ping", "-c", "1", "-W", str(timeout), ip,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            "/usr/bin/ping", "-c", str(count), "-i", "0.5",
+            "-W", str(timeout), ip,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        await proc.wait()
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            err = stderr.decode().strip() or stdout.decode().strip()
+            if err:
+                log.warning(f"ping {ip} rc={proc.returncode}: {err}")
         return proc.returncode == 0
     except Exception as e:
         log.error(f"Ping {ip} exception: {e}")
@@ -99,7 +111,9 @@ async def is_real_outage(config: Config) -> bool:
     Zeb down + gateway up   → real power cut (Zeb lost utility power)
     Zeb down + gateway down → network issue (don't trigger shutdown)
     """
-    gateway_alive = await ping(config.gateway_ip, config.ping_timeout_sec)
+    gateway_alive = await ping(
+        config.gateway_ip, config.ping_timeout_sec, config.ping_packet_count
+    )
     if not gateway_alive:
         log.warning(
             f"Zeb is down BUT gateway {config.gateway_ip} is also down → "
@@ -254,7 +268,9 @@ async def run(config: Config) -> None:
     )
 
     while True:
-        alive = await ping(config.zeb_sp110_ip, config.ping_timeout_sec)
+        alive = await ping(
+            config.zeb_sp110_ip, config.ping_timeout_sec, config.ping_packet_count
+        )
 
         if alive:
             if consecutive_failures > 0:
@@ -285,14 +301,26 @@ async def run(config: Config) -> None:
 def load_config_from_env() -> Config:
     """Override defaults from environment variables if present."""
     config = Config()
-    for field_name in (
+    string_fields = (
         "zeb_sp110_ip", "gateway_ip", "tapo_ip", "tapo_email", "tapo_password",
         "ha_webhook_power_cut", "ha_webhook_tapo_failed",
         "hdd_device", "storage_mount",
-    ):
+    )
+    int_fields = (
+        "ping_interval_sec", "failure_threshold_sec", "tapo_countdown_sec",
+        "ping_timeout_sec", "ping_packet_count", "webhook_timeout_sec",
+    )
+    for field_name in string_fields:
         env_key = f"POWER_DAEMON_{field_name.upper()}"
         if env_key in os.environ:
             setattr(config, field_name, os.environ[env_key])
+    for field_name in int_fields:
+        env_key = f"POWER_DAEMON_{field_name.upper()}"
+        if env_key in os.environ:
+            try:
+                setattr(config, field_name, int(os.environ[env_key]))
+            except ValueError:
+                log.warning(f"Ignoring invalid int in {env_key}={os.environ[env_key]!r}")
     return config
 
 
