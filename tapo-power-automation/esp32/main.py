@@ -43,6 +43,12 @@ TAPO_PASSWORD = "pass"
 MINI_PC_IP = "192.168.1.50"
 MINI_PC_PORT = 22
 
+# Zeb SP110 — used as "is mains stable?" check before turning Tapo on.
+# If unreachable, mains may be flickering; defer the turn-on attempt.
+# We try multiple ports because Tuya plugs vary in what they expose.
+ZEB_SP110_IP = "192.168.1.110"
+ZEB_SP110_PORTS = (80, 6668)  # web admin, Tuya local protocol
+
 HA_BASE_URL = "http://192.168.1.50:8123"
 HA_HEARTBEAT_URL = HA_BASE_URL + "/api/webhook/esp32_heartbeat"
 HA_POWER_RESTORED_URL = HA_BASE_URL + "/api/webhook/esp32_power_restored"
@@ -141,6 +147,17 @@ def check_host(ip, port=22, timeout=3):
                 s.close()
             except OSError:
                 pass
+
+
+def check_zeb_alive():
+    """
+    Returns True if Zeb SP110 responds on any of ZEB_SP110_PORTS.
+    Used as a "mains is stable" indicator before turning Tapo back on.
+    """
+    for port in ZEB_SP110_PORTS:
+        if check_host(ZEB_SP110_IP, port, timeout=3):
+            return True
+    return False
 
 
 # --- Crypto helpers ---
@@ -518,7 +535,16 @@ def main():
                 time.sleep(DEBOUNCE_SLEEP_SEC)
             continue
 
-        # Tapo is OFF + Mini PC is down → turn on
+        # Tapo is OFF + Mini PC is down → confirm mains is stable before powering on
+        log("Tapo is OFF. Verifying Zeb {} is reachable...".format(ZEB_SP110_IP))
+        if not check_zeb_alive():
+            log("Zeb unreachable — mains may be unstable / just restored. "
+                "Holding off Tapo turn-on; will retry next cycle.")
+            consecutive_failures = 0
+            time.sleep(NORMAL_SLEEP_SEC)
+            continue
+        log("Zeb is reachable → mains stable.")
+
         log("Mini PC down + Tapo OFF → turning ON Tapo")
         turn_on_success = False
         for attempt in range(3):
