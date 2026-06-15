@@ -78,24 +78,7 @@
           will proceed but HDD power won't auto-cut.
   mode: single
 
-# 5. ESP32 successfully turned Tapo back on after grid restoration.
-- alias: Power Restored
-  description: WhatsApp alert when ESP32 detects power back and turns on Tapo.
-  triggers:
-    - trigger: webhook
-      webhook_id: esp32_power_restored
-      allowed_methods:
-        - POST
-      local_only: true
-  actions:
-    - action: shell_command.whatsapp_alert
-      data:
-        to: !secret whatsapp_phone
-        message: >-
-          ✅ Power restored. Tapo turned ON, Mini PC booting.
-  mode: single
-
-# 6. Mini PC stays unreachable while Tapo is ON (boot failure / hung).
+# 5. Mini PC stays unreachable while Tapo is ON (boot failure / hung).
 - alias: Mini PC Stuck Alert
   description: Alert when Tapo is on but Mini PC won't come up.
   triggers:
@@ -111,4 +94,26 @@
         message: >-
           ⚠️ Mini PC unreachable but Tapo is ON. Possible boot failure —
           investigate.
+  mode: single
+
+# 6. Mini PC power-daemon started — sends recovery / startup notification.
+#    Includes outage_minutes when daemon-managed shutdown preceded the boot;
+#    plain "up" message for manual reboots / first install.
+- alias: Mini PC Recovered
+  description: WhatsApp alert when power-daemon starts on Mini PC.
+  triggers:
+    - trigger: webhook
+      webhook_id: minipc_recovered
+      allowed_methods:
+        - POST
+      local_only: true
+  actions:
+    - action: shell_command.whatsapp_alert
+      data:
+        to: !secret whatsapp_phone
+        message: >-
+          🟢 Mini PC back online at {{ now().strftime('%Y-%m-%d %H:%M') }}
+          {%- if trigger.json.outage_minutes is defined %}
+          (after {{ trigger.json.outage_minutes }} min outage)
+          {%- endif -%}.
   mode: single

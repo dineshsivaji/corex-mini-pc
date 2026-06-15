@@ -157,7 +157,7 @@ UUID=xxxx /mnt/storage ext4 defaults,nofail,x-systemd.device-timeout=60s 0 2
 ### 1.8 Verify daemon imports cleanly
 
 ```bash
-sudo -u hgd469 /opt/power-daemon/venv/bin/python -c \
+sudo -u dinesh /opt/power-daemon/.venv/bin/python -c \
   "import sys; sys.path.insert(0, '/opt/power-daemon'); import power_daemon; print('OK')"
 ```
 
@@ -172,7 +172,10 @@ sudo systemctl start power-daemon
 sudo systemctl status power-daemon
 ```
 
-Status should show `active (running)`.
+Status should show `active (running)`. systemd auto-creates
+`/var/lib/power-daemon/` (owned by `dinesh`) thanks to the
+`StateDirectory=` directive in the unit — used to store the managed-
+shutdown marker for the recovery notification.
 
 ### 1.10 Watch logs — verify it's pinging Zeb
 
@@ -288,8 +291,9 @@ Click **Call Service**. You should receive a WhatsApp message within
 curl -X POST http://localhost:8123/api/webhook/esp32_heartbeat -d '{}'
 curl -X POST http://localhost:8123/api/webhook/power_cut_imminent -d '{}'
 curl -X POST http://localhost:8123/api/webhook/tapo_command_failed -d '{}'
-curl -X POST http://localhost:8123/api/webhook/esp32_power_restored -d '{}'
 curl -X POST http://localhost:8123/api/webhook/esp32_mini_pc_stuck -d '{}'
+curl -X POST http://localhost:8123/api/webhook/minipc_recovered \
+  -H "Content-Type: application/json" -d '{"outage_minutes": 7}'
 ```
 
 You should receive four WhatsApp messages (heartbeat only updates the

@@ -62,6 +62,12 @@ class Config:
     # HA webhook (local — same host)
     ha_webhook_power_cut: str = "http://localhost:8123/api/webhook/power_cut_imminent"
     ha_webhook_tapo_failed: str = "http://localhost:8123/api/webhook/tapo_command_failed"
+    ha_webhook_recovered: str = "http://localhost:8123/api/webhook/minipc_recovered"
+
+    # State directory (overridden by systemd's STATE_DIRECTORY env var).
+    # Used to persist a "managed-shutdown" marker across reboots so the next
+    # daemon start can announce recovery + outage duration.
+    state_dir: str = "/var/lib/power-daemon"
 
     # Shutdown sequence
     hdd_device: str = "/dev/sda"
@@ -143,6 +149,50 @@ def fire_webhook(url: str, payload: dict, timeout: int) -> bool:
     except Exception as e:
         log.warning(f"Webhook {url} failed: {e}")
         return False
+
+
+async def maybe_send_recovery_notification(config: Config) -> None:
+    """
+    On daemon startup, fire a "Mini PC back online" webhook to HA.
+    If a managed-shutdown marker exists with a fresh-but-not-too-fresh mtime
+    (30s..24h), include the outage duration. Otherwise just notify presence.
+
+    Retries for up to 2 minutes since HA may still be initializing inside
+    Docker right after a power-restore boot.
+    """
+    marker = os.path.join(config.state_dir, "managed-shutdown")
+    duration_min = None
+
+    try:
+        elapsed = time.time() - os.stat(marker).st_mtime
+        if elapsed < 30:
+            log.info("Marker too fresh (daemon restart) — skipping recovery webhook")
+            return
+        if 30 <= elapsed <= 86400:
+            duration_min = int(elapsed / 60)
+        # else: stale (>24h) — keep duration_min = None
+        try:
+            os.remove(marker)
+        except Exception as e:
+            log.warning(f"Could not delete marker {marker}: {e}")
+    except FileNotFoundError:
+        pass  # No marker → manual reboot / first boot
+    except Exception as e:
+        log.warning(f"State marker read error: {e}")
+
+    payload = {"reason": "minipc_back_online"}
+    if duration_min is not None:
+        payload["outage_minutes"] = duration_min
+
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        if fire_webhook(
+            config.ha_webhook_recovered, payload, config.webhook_timeout_sec
+        ):
+            log.info(f"Recovery webhook delivered (duration_min={duration_min})")
+            return
+        await asyncio.sleep(5)
+    log.warning("Recovery webhook never reached HA within 120s; giving up")
 
 
 # --- Tapo control ---
@@ -227,6 +277,16 @@ async def execute_shutdown_sequence(config: Config) -> None:
     """Pre-shutdown sequence + final shutdown command. Does not return."""
     log.critical("=== POWER FAILURE: starting shutdown sequence ===")
 
+    # Step 0: drop a marker so the next boot can announce the outage
+    # duration via the recovery notification.
+    marker = os.path.join(config.state_dir, "managed-shutdown")
+    try:
+        with open(marker, "w") as f:
+            f.write(time.strftime("%Y-%m-%dT%H:%M:%S"))
+        log.info(f"State marker written: {marker}")
+    except Exception as e:
+        log.warning(f"Could not write state marker {marker}: {e}")
+
     # 1. Notify HA → WhatsApp (fire-and-forget)
     log.info("Step 1/7: Notifying HA webhook")
     fire_webhook(
@@ -275,6 +335,10 @@ async def run(config: Config) -> None:
         f"gateway={config.gateway_ip} threshold={config.failure_threshold_sec}s"
     )
 
+    # Fire recovery / startup notification in the background — does not block
+    # the watchdog loop.
+    asyncio.ensure_future(maybe_send_recovery_notification(config))
+
     while True:
         alive = await ping(
             config.zeb_sp110_ip, config.ping_timeout_sec, config.ping_packet_count
@@ -311,8 +375,8 @@ def load_config_from_env() -> Config:
     config = Config()
     string_fields = (
         "zeb_sp110_ip", "gateway_ip", "tapo_ip", "tapo_email", "tapo_password",
-        "ha_webhook_power_cut", "ha_webhook_tapo_failed",
-        "hdd_device", "storage_mount",
+        "ha_webhook_power_cut", "ha_webhook_tapo_failed", "ha_webhook_recovered",
+        "hdd_device", "storage_mount", "state_dir",
     )
     int_fields = (
         "ping_interval_sec", "failure_threshold_sec", "tapo_countdown_sec",
@@ -321,14 +385,18 @@ def load_config_from_env() -> Config:
     for field_name in string_fields:
         env_key = f"POWER_DAEMON_{field_name.upper()}"
         if env_key in os.environ:
-            setattr(config, field_name, os.environ[env_key])
+            setattr(config, field_name, os.environ[env_key].split("#")[0].strip())
     for field_name in int_fields:
         env_key = f"POWER_DAEMON_{field_name.upper()}"
         if env_key in os.environ:
             try:
-                setattr(config, field_name, int(os.environ[env_key]))
+                raw = os.environ[env_key].split("#")[0].strip()
+                setattr(config, field_name, int(raw))
             except ValueError:
                 log.warning(f"Ignoring invalid int in {env_key}={os.environ[env_key]!r}")
+    # systemd's StateDirectory= sets this — prefer it over the configured default.
+    if "STATE_DIRECTORY" in os.environ:
+        config.state_dir = os.environ["STATE_DIRECTORY"]
     return config
 
 

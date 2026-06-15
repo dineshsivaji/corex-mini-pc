@@ -9,7 +9,8 @@ EnvironmentFile=-/etc/default/power-daemon
 ExecStart=/opt/power-daemon/.venv/bin/python /opt/power-daemon/power_daemon.py
 Restart=always
 RestartSec=10
-User=user
+User=dinesh
+StateDirectory=power-daemon
 
 [Install]
 WantedBy=multi-user.target

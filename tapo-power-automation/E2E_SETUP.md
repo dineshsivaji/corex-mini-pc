@@ -71,10 +71,10 @@
   sudo visudo -f /etc/sudoers.d/power-daemon
 
   Paste:
-  dinesh ALL=(ALL) NOPASSWD: /sbin/shutdown
-  dinesh ALL=(ALL) NOPASSWD: /sbin/hdparm
-  dinesh ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop docker
-  dinesh ALL=(ALL) NOPASSWD: /usr/bin/umount /mnt/storage
+  hgd469 ALL=(ALL) NOPASSWD: /sbin/shutdown
+  hgd469 ALL=(ALL) NOPASSWD: /sbin/hdparm
+  hgd469 ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop docker
+  hgd469 ALL=(ALL) NOPASSWD: /usr/bin/umount /mnt/storage
 
   (Save: Ctrl+O, Enter, Ctrl+X.)
 
@@ -91,7 +91,7 @@
 
   1.7 Verify daemon imports cleanly
 
-  sudo -u dinesh python3 -c "import sys; sys.path.insert(0, '/opt/power-daemon'); import power_daemon; print('OK')"
+  sudo -u hgd469 python3 -c "import sys; sys.path.insert(0, '/opt/power-daemon'); import power_daemon; print('OK')"
 
   Should print OK. If kasa import fails, run sudo pip3 install python-kasa again.
 
@@ -187,7 +187,6 @@
   curl -X POST http://localhost:8123/api/webhook/esp32_heartbeat -d '{}'
   curl -X POST http://localhost:8123/api/webhook/power_cut_imminent -d '{}'
   curl -X POST http://localhost:8123/api/webhook/tapo_command_failed -d '{}'
-  curl -X POST http://localhost:8123/api/webhook/esp32_power_restored -d '{}'
   curl -X POST http://localhost:8123/api/webhook/esp32_mini_pc_stuck -d '{}'
 
   You should receive five WhatsApp messages (one for each — except heartbeat which only updates the timestamp). Verify with:

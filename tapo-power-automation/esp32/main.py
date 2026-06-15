@@ -36,7 +36,7 @@ import urequests
 WIFI_SSID = "wifi_ssd"
 WIFI_PASSWORD = "wifi_pass"
 
-TAPO_IP = "192.168.1.110"
+TAPO_IP = "192.168.1.111"
 TAPO_EMAIL = "email"
 TAPO_PASSWORD = "pass"
 
@@ -51,7 +51,6 @@ ZEB_SP110_PORTS = (80, 6668)  # web admin, Tuya local protocol
 
 HA_BASE_URL = "http://192.168.1.50:8123"
 HA_HEARTBEAT_URL = HA_BASE_URL + "/api/webhook/esp32_heartbeat"
-HA_POWER_RESTORED_URL = HA_BASE_URL + "/api/webhook/esp32_power_restored"
 HA_MINI_PC_STUCK_URL = HA_BASE_URL + "/api/webhook/esp32_mini_pc_stuck"
 
 BOOT_DELAY_SEC = 60
@@ -579,18 +578,17 @@ def main():
         log("Zeb is reachable → mains stable.")
 
         log("Mini PC down + Tapo OFF → turning ON Tapo")
-        turn_on_success = False
         for attempt in range(3):
             log("  Attempt {}/3...".format(attempt + 1))
             if turn_on_tapo(TAPO_IP):
-                turn_on_success = True
                 break
             time.sleep(5)
         else:
             log("  All attempts failed")
 
-        if turn_on_success:
-            fire_webhook(HA_POWER_RESTORED_URL, {"action": "tapo_turned_on"})
+        # Note: no HA notification fired here. Mini PC + HA are still booting,
+        # so the webhook would silently fail. The Mini PC's power-daemon sends
+        # the recovery notification once it comes up.
 
         # Reset counter and give Mini PC time to boot
         consecutive_failures = 0

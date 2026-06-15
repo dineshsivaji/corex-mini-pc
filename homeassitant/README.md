@@ -47,5 +47,5 @@ to the Mini PC.
 - `POST /api/webhook/esp32_heartbeat` — ESP32 hourly heartbeat
 - `POST /api/webhook/power_cut_imminent` — Mini PC daemon, pre-shutdown
 - `POST /api/webhook/tapo_command_failed` — Mini PC daemon, Tapo retry exhausted
-- `POST /api/webhook/esp32_power_restored` — ESP32 after `turn_on_tapo` success
 - `POST /api/webhook/esp32_mini_pc_stuck` — ESP32 when Tapo on but Mini PC down >10 min
+- `POST /api/webhook/minipc_recovered` — power-daemon on startup (includes `outage_minutes` after a managed shutdown; bare on manual reboot)
