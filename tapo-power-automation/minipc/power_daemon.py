@@ -255,8 +255,8 @@ async def execute_shutdown_sequence(config: Config) -> None:
     run_cmd(["sudo", "hdparm", "-Y", config.hdd_device], "hdparm -Y")
 
     # 7. Final shutdown
-    log.critical("Step 7/7: shutdown -h now")
-    subprocess.run(["sudo", "shutdown", "-h", "now"])
+    log.critical("Step 7/7: shutdown -P now")
+    subprocess.run(["sudo", "shutdown", "-P", "now"])
 
 
 # --- Main loop ---

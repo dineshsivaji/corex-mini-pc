@@ -131,8 +131,8 @@ sudo visudo -f /etc/sudoers.d/power-daemon
 Paste:
 
 ```
-dinesh ALL=(ALL) NOPASSWD: /sbin/shutdown
-dinesh ALL=(ALL) NOPASSWD: /sbin/hdparm
+dinesh ALL=(ALL) NOPASSWD: /usr/sbin/shutdown
+dinesh ALL=(ALL) NOPASSWD: /usr/sbin/hdparm
 dinesh ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop docker
 dinesh ALL=(ALL) NOPASSWD: /usr/bin/umount /mnt/storage
 ```
@@ -157,7 +157,7 @@ UUID=xxxx /mnt/storage ext4 defaults,nofail,x-systemd.device-timeout=60s 0 2
 ### 1.8 Verify daemon imports cleanly
 
 ```bash
-sudo -u dinesh /opt/power-daemon/venv/bin/python -c \
+sudo -u hgd469 /opt/power-daemon/venv/bin/python -c \
   "import sys; sys.path.insert(0, '/opt/power-daemon'); import power_daemon; print('OK')"
 ```
 
