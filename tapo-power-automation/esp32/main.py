@@ -549,8 +549,8 @@ def main():
 
         log("Mini PC down + Tapo OFF → turning ON Tapo")
         turn_on_success = False
-        for attempt in range(3):
-            log("  Attempt {}/3...".format(attempt + 1))
+        for attempt in range(10):
+            log("  Attempt {}/10...".format(attempt + 1))
             if turn_on_tapo(TAPO_IP):
                 turn_on_success = True
                 break
