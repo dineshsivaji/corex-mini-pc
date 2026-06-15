@@ -449,6 +449,16 @@ def main():
     ensure_wifi()
     sync_ntp()
 
+    # Start WebREPL — gives browser-based access to live print() output
+    # and a remote REPL. Password is read from /webrepl_cfg.py
+    # (created by `import webrepl_setup` from USB).
+    try:
+        import webrepl
+        webrepl.start()
+        log("WebREPL started — connect from http://micropython.org/webrepl/")
+    except Exception as e:
+        log("WebREPL not started: {}".format(e))
+
     log("Boot delay: waiting {}s (grid flicker guard)...".format(BOOT_DELAY_SEC))
     time.sleep(BOOT_DELAY_SEC)
 
