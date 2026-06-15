@@ -9,7 +9,7 @@ EnvironmentFile=-/etc/default/power-daemon
 ExecStart=/opt/power-daemon/.venv/bin/python /opt/power-daemon/power_daemon.py
 Restart=always
 RestartSec=10
-User=hgd469
+User=user
 
 [Install]
 WantedBy=multi-user.target

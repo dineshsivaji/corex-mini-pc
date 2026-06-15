@@ -80,13 +80,13 @@ in `power_daemon.py`). Required keys are listed in
 Create `/etc/sudoers.d/power-daemon` (use `sudo visudo -f`):
 
 ```
-hgd469 ALL=(ALL) NOPASSWD: /sbin/shutdown
-hgd469 ALL=(ALL) NOPASSWD: /sbin/hdparm
-hgd469 ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop docker
-hgd469 ALL=(ALL) NOPASSWD: /usr/bin/umount /mnt/storage
+dinesh ALL=(ALL) NOPASSWD: /sbin/shutdown
+dinesh ALL=(ALL) NOPASSWD: /sbin/hdparm
+dinesh ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop docker
+dinesh ALL=(ALL) NOPASSWD: /usr/bin/umount /mnt/storage
 ```
 
-(Replace `hgd469` with the user the systemd unit runs as.)
+(Replace `dinesh` with the user the systemd unit runs as.)
 
 ### 5. Enable and start
 
