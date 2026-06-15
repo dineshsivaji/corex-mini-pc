@@ -164,10 +164,12 @@ async def set_tapo_countdown(config: Config) -> bool:
             "enable": True,
             "remain": config.tapo_countdown_sec,
         })
-        # python-kasa returns the unwrapped result; treat absence of exception as success
+        rule_id = result.get("add_countdown_rule", {}).get("id")
+        if not rule_id:
+            raise Exception(f"Unexpected response (no rule id): {result}")
         log.info(
-            f"Tapo countdown set: power cut in {config.tapo_countdown_sec}s "
-            f"(response: {result})"
+            f"Tapo countdown set: rule_id={rule_id}, "
+            f"cuts in {config.tapo_countdown_sec}s"
         )
         return True
     except Exception as e:
