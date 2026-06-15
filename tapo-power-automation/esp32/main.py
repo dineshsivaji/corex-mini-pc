@@ -388,6 +388,8 @@ def turn_on_tapo(tapo_ip):
             s, tapo_ip, cookie, key, iv, sig_key, seq,
             {"method": "set_device_info", "params": {"device_on": True}}
         )
+        log ("status : {}".format(status))
+        log("response: {}".format(response))
         if status == 200:
             log("  Tapo turned ON!")
             return True
