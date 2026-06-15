@@ -92,6 +92,27 @@ def log(msg):
     print(_format_ts(), msg)
 
 
+# Module-level WDT handle so cooperative_sleep can feed it.
+_WDT = None
+
+
+def cooperative_sleep(seconds):
+    """
+    Sleep in 1-second chunks, feeding the WDT each chunk.
+    Prevents WDT timeout during long waits and keeps WebREPL responsive.
+    Falls back to plain time.sleep if WDT not yet initialized.
+    """
+    if _WDT is None or seconds <= 1:
+        time.sleep(seconds)
+        return
+    remaining = int(seconds)
+    while remaining > 0:
+        _WDT.feed()
+        chunk = 1 if remaining > 1 else remaining
+        time.sleep(chunk)
+        remaining -= chunk
+
+
 # --- WiFi ---
 
 def ensure_wifi():
@@ -388,8 +409,6 @@ def turn_on_tapo(tapo_ip):
             s, tapo_ip, cookie, key, iv, sig_key, seq,
             {"method": "set_device_info", "params": {"device_on": True}}
         )
-        log ("status : {}".format(status))
-        log("response: {}".format(response))
         if status == 200:
             log("  Tapo turned ON!")
             return True
@@ -470,6 +489,8 @@ def main():
 
     # Hardware watchdog: auto-reset if loop hangs > WDT_TIMEOUT_MS
     wdt = machine.WDT(timeout=WDT_TIMEOUT_MS)
+    global _WDT
+    _WDT = wdt
 
     log("Entering watchdog loop...")
     consecutive_failures = 0
@@ -504,7 +525,7 @@ def main():
             consecutive_failures = 0
             stuck_since = 0
             stuck_alerted = False
-            time.sleep(NORMAL_SLEEP_SEC)
+            cooperative_sleep(NORMAL_SLEEP_SEC)
             continue
 
         consecutive_failures += 1
@@ -512,7 +533,7 @@ def main():
             consecutive_failures, FAILURE_THRESHOLD))
 
         if consecutive_failures < FAILURE_THRESHOLD:
-            time.sleep(DEBOUNCE_SLEEP_SEC)
+            cooperative_sleep(DEBOUNCE_SLEEP_SEC)
             continue
 
         # Threshold reached — check Tapo state
@@ -534,17 +555,17 @@ def main():
                 })
                 stuck_alerted = True
             consecutive_failures = 0
-            time.sleep(NORMAL_SLEEP_SEC)
+            cooperative_sleep(NORMAL_SLEEP_SEC)
             continue
 
         if tapo_on is None:
             if consecutive_failures > FAILURE_THRESHOLD + 5:
                 log("Could not reach Tapo after multiple tries. Backing off...")
                 consecutive_failures = 0
-                time.sleep(NORMAL_SLEEP_SEC)
+                cooperative_sleep(NORMAL_SLEEP_SEC)
             else:
                 log("Could not reach Tapo, will retry...")
-                time.sleep(DEBOUNCE_SLEEP_SEC)
+                cooperative_sleep(DEBOUNCE_SLEEP_SEC)
             continue
 
         # Tapo is OFF + Mini PC is down → confirm mains is stable before powering on
@@ -553,14 +574,14 @@ def main():
             log("Zeb unreachable — mains may be unstable / just restored. "
                 "Holding off Tapo turn-on; will retry next cycle.")
             consecutive_failures = 0
-            time.sleep(NORMAL_SLEEP_SEC)
+            cooperative_sleep(NORMAL_SLEEP_SEC)
             continue
         log("Zeb is reachable → mains stable.")
 
         log("Mini PC down + Tapo OFF → turning ON Tapo")
         turn_on_success = False
-        for attempt in range(10):
-            log("  Attempt {}/10...".format(attempt + 1))
+        for attempt in range(3):
+            log("  Attempt {}/3...".format(attempt + 1))
             if turn_on_tapo(TAPO_IP):
                 turn_on_success = True
                 break
@@ -576,7 +597,7 @@ def main():
         stuck_since = 0
         stuck_alerted = False
         log("Waiting for Mini PC to boot...")
-        time.sleep(NORMAL_SLEEP_SEC)
+        cooperative_sleep(NORMAL_SLEEP_SEC)
 
 
 main()
