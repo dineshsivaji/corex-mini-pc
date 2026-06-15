@@ -21,7 +21,7 @@ Shutdown sequence:
     3. Set Tapo countdown(60s, off) — verify response, retry once on failure
     4. systemctl stop docker (graceful service shutdown)
     5. umount /mnt/storage (best-effort)
-    6. hdparm -Y /dev/sda (park HDD heads cleanly — no "krik" sound)
+    6. hdparm -y /dev/sda (park HDD heads cleanly — no "krik" sound)
     7. shutdown -h now (Tapo cuts power 60s later)
 """
 
@@ -31,6 +31,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 import urllib.request
 from dataclasses import dataclass
 
@@ -250,12 +251,17 @@ async def execute_shutdown_sequence(config: Config) -> None:
     log.info(f"Step 5/7: umount {config.storage_mount}")
     run_cmd(["sudo", "umount", config.storage_mount], "umount")
 
-    # 6. Park HDD heads
-    log.info(f"Step 6/7: hdparm -Y {config.hdd_device}")
-    run_cmd(["sudo", "hdparm", "-Y", config.hdd_device], "hdparm -Y")
+    # 6. Park HDD heads (STANDBY — heads parked but drive still responds,
+    # avoids 5-min USB timeout that -Y/SLEEP causes during shutdown)
+    log.info(f"Step 6/7: hdparm -y {config.hdd_device}")
+    run_cmd(["sudo", "hdparm", "-y", config.hdd_device], "hdparm -y")
 
     # 7. Final shutdown
-    log.critical("Step 7/7: shutdown -P now")
+    log.critical("Step 7/7: shutdown -P now — system going down")
+    # Flush log handlers so the above line reaches journald before the OS halts
+    for handler in log.handlers:
+        handler.flush()
+    time.sleep(1)
     subprocess.run(["sudo", "shutdown", "-P", "now"])
 
 
