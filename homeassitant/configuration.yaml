@@ -38,3 +38,12 @@ shell_command:
     curl -s -X POST http://localhost:3001/send
     -H "Content-Type: application/json"
     -d '{"to": "{{ to }}", "message": "{{ message }}"}'
+
+# Sequential cursor for the 100 status lines used by Mini PC Recovered alert.
+# Persists across HA restarts so the line rotation continues normally.
+counter:
+  recovery_index:
+    name: Recovery Message Cursor
+    initial: 0
+    step: 1
+    restore: true

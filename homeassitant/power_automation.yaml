@@ -99,6 +99,7 @@
 # 6. Mini PC power-daemon started — sends recovery / startup notification.
 #    Includes outage_minutes when daemon-managed shutdown preceded the boot;
 #    plain "up" message for manual reboots / first install.
+#    Appends one of 100 funny status lines (rotated via counter.recovery_index).
 - alias: Mini PC Recovered
   description: WhatsApp alert when power-daemon starts on Mini PC.
   triggers:
@@ -107,12 +108,19 @@
       allowed_methods:
         - POST
       local_only: true
+  variables:
+    lines: !include quote_lines.yaml
+    idx: "{{ states('counter.recovery_index') | int(0) % (lines | length) }}"
+    flavor: "{{ lines[idx | int] }}"
   actions:
+    - action: counter.increment
+      target:
+        entity_id: counter.recovery_index
     - action: shell_command.whatsapp_alert
       data:
         to: !secret whatsapp_phone
         message: >-
-          🟢 Mini PC back online at {{ now().strftime('%Y-%m-%d %H:%M') }}
+          🟢 {{ flavor }} at {{ now().strftime('%H:%M') }}
           {%- if trigger.json.outage_minutes is defined %}
           (after {{ trigger.json.outage_minutes }} min outage)
           {%- endif -%}.
