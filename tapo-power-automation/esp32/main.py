@@ -36,7 +36,7 @@ import urequests
 WIFI_SSID = "wifi_ssd"
 WIFI_PASSWORD = "wifi_pass"
 
-TAPO_IP = "192.168.1.111"
+TAPO_IP = "192.168.1.110"
 TAPO_EMAIL = "email"
 TAPO_PASSWORD = "pass"
 
