@@ -177,6 +177,13 @@ Status should show `active (running)`. systemd auto-creates
 `StateDirectory=` directive in the unit — used to store the managed-
 shutdown marker for the recovery notification.
 
+The daemon won't immediately enter the watchdog loop after start — it
+waits for HA's port (8123) to respond so the recovery WhatsApp reaches
+a live HA endpoint. On a clean boot this adds ~30-90s. Watch the
+journal for `HA reachable after Xs`. If HA never becomes reachable
+within 5 min, the daemon proceeds anyway (logs `HA never reachable in
+300s, starting daemon anyway`).
+
 ### 1.10 Watch logs — verify it's pinging Zeb
 
 ```bash

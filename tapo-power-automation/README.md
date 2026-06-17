@@ -291,8 +291,21 @@ umount /mnt/storage → hdparm -Y /dev/sda → shutdown -h now
 ```
 Grid returns → Zeb reachable → Mini PC stays off (Tapo cut earlier) →
 ESP32 sees Mini PC down + Tapo OFF → ESP32 turns Tapo ON →
-Mini PC boots (BIOS "Restore on AC Loss") → WhatsApp alert
+Mini PC boots (BIOS "Restore on AC Loss") →
+systemd waits for /mnt/storage mount →
+Docker starts containers (HA, WhatsApp API) →
+power-daemon's ExecStartPre polls localhost:8123 until HA responds →
+power-daemon launches → fires recovery webhook to HA →
+HA invokes shell_command.whatsapp_alert →
+WhatsApp message arrives (with outage_minutes if managed shutdown
+preceded the boot)
 ```
+
+The HA-port wait inside the daemon's systemd unit is what makes the
+recovery WhatsApp reliable: by the time the webhook fires, HA is
+guaranteed to have finished booting inside its container. Without that
+gate, the webhook would race HA's startup and silently fail in real
+outages.
 
 ---
 

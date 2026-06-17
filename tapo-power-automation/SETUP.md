@@ -97,6 +97,27 @@ sudo systemctl start power-daemon
 sudo journalctl -u power-daemon -f
 ```
 
+#### Boot-ordering note
+
+The unit declares `After=docker.service wait-for-storage.service` and an
+`ExecStartPre` that polls `localhost:8123` (Home Assistant) every 5s for
+up to 5 minutes before launching the daemon. This guarantees the
+recovery WhatsApp notification — which the daemon fires on every
+startup — actually reaches a live HA endpoint instead of a half-booted
+host.
+
+Expect the first launch after a cold boot to take an extra ~30-90s
+(while HA finishes coming up inside its container). Watch in real time:
+
+```bash
+sudo journalctl -u power-daemon -f
+# Look for: "HA reachable after Xs" → daemon then enters its watchdog loop
+```
+
+If HA never becomes reachable within 5 minutes, the daemon proceeds
+anyway (logs `HA never reachable in 300s, starting daemon anyway`) so
+power monitoring is never permanently blocked by an HA outage.
+
 ### 6. BIOS configuration
 
 Set: **Restore on AC Power Loss → Power On**
