@@ -51,9 +51,9 @@ log = logging.getLogger("power-daemon")
 @dataclass
 class Config:
     # Network targets
-    zeb_sp110_ip: str = "192.168.1.110"
+    zeb_sp110_ip: str = "192.168.1.111"
     gateway_ip: str = "192.168.1.1"
-    tapo_ip: str = "192.168.1.111"
+    tapo_ip: str = "192.168.1.110"
 
     # Tapo credentials (override via env in production)
     tapo_email: str = "your_tapo_email@example.com"
@@ -313,8 +313,8 @@ async def execute_shutdown_sequence(config: Config) -> None:
 
     # 6. Park HDD heads (STANDBY — heads parked but drive still responds,
     # avoids 5-min USB timeout that -Y/SLEEP causes during shutdown)
-    log.info(f"Step 6/7: hdparm -y {config.hdd_device}")
-    run_cmd(["sudo", "hdparm", "-y", config.hdd_device], "hdparm -y")
+    #log.info(f"Step 6/7: hdparm -y {config.hdd_device}")
+    #run_cmd(["sudo", "hdparm", "-y", config.hdd_device], "hdparm -y")
 
     # 7. Final shutdown
     log.critical("Step 7/7: shutdown -P now — system going down")
