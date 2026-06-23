@@ -13,7 +13,10 @@ EnvironmentFile=-/etc/default/power-daemon
 # Block until HA's port (8123) responds. Polls every 5s for up to ~5 min.
 # `exit 0` at the end means we proceed even if HA never comes up — power
 # monitoring is more important than the recovery notification.
-ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do (echo > /dev/tcp/localhost/8123) 2>/dev/null && echo "HA reachable after $((i*5))s" && exit 0; sleep 5; done; echo "HA never reachable in 300s, starting daemon anyway"; exit 0'
+#ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do (echo > /dev/tcp/localhost/8123) 2>/dev/null && echo "HA reachable after $((i*5))s" && exit 0; sleep 5; done; echo "HA never reachable in 300s, starting daemon anyway"; exit 0'
+ExecStartPre=/bin/bash -c 'echo "Waiting for HA..."; for i in $(seq 1 60); do (echo > /dev/tcp/localhost/8123) 2>/dev/null && echo "HA reachable after $((i*5))s" && break; sleep 5; done;
+  echo "Waiting for WhatsApp API /health (max 60s)..."; for i in $(seq 1 12); do curl -fsS --max-time 3 http://localhost:3001/health >/dev/null 2>&1 && echo "WhatsApp healthy after
+  $((i*5))s" && exit 0; sleep 5; done; echo "WhatsApp not healthy in 60s, starting anyway"; exit 0'
 ExecStart=/opt/power-daemon/.venv/bin/python /opt/power-daemon/power_daemon.py
 Restart=always
 RestartSec=10

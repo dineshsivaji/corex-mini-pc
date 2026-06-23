@@ -1,0 +1,9 @@
+version: "3.9"
+
+services:
+  webrepl:
+    build: .
+    environment:
+      WEBREPL_PASSWORD: welcome
+    stdin_open: true
+    tty: true
