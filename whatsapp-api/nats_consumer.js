@@ -18,7 +18,7 @@
 // Crash safety: JetStream holds the message until ack(); a process
 // crash mid-delivery just means redelivery on next start.
 
-import { connect, headers as natsHeaders } from "nats";
+const { connect } = require("nats");
 
 const NATS_URL      = process.env.NATS_URL      || "nats://127.0.0.1:4222";
 const NATS_STREAM   = process.env.NATS_STREAM   || "NOTIFY";
@@ -37,16 +37,19 @@ const NAK_DELAYS_MS = [
     30 * 60_000,
 ];
 
-const PULL_BATCH_SIZE   = 1;
-const PULL_EXPIRES_MS   = 5_000;
-const NOT_READY_NAK_MS  = 30_000;
+const NOT_READY_NAK_MS = 30_000;
+
+// consume() pre-fetch budget. Small because we process sequentially and
+// a slow send shouldn't hold lots of messages in ack-pending state.
+const MAX_MESSAGES = 10;
+const EXPIRES_MS   = 30_000;
 
 function nakDelay(deliveryCount) {
     const i = Math.min(Math.max(deliveryCount - 1, 0), NAK_DELAYS_MS.length - 1);
     return NAK_DELAYS_MS[i];
 }
 
-export async function startNatsConsumer({ sendMessage, isReady, log = console }) {
+async function startNatsConsumer({ sendMessage, isReady, log = console }) {
     if (typeof sendMessage !== "function") {
         throw new Error("startNatsConsumer: sendMessage(to, text) is required");
     }
@@ -63,42 +66,43 @@ export async function startNatsConsumer({ sendMessage, isReady, log = console })
     });
     log.info(`[nats] connected to ${NATS_URL}`);
 
+    // New nats.js consumer API. js.consumers.get(...) gives us a handle
+    // to the durable consumer created by nats/setup-streams.sh. The
+    // legacy js.pullSubscribe(...) path no longer exposes .fetch() in
+    // current nats.js, so we use consume() here — it's the supported
+    // modern idiom and handles reconnection / heartbeats automatically.
     const js = nc.jetstream();
-    const sub = await js.pullSubscribe("notify.whatsapp", {
-        stream: NATS_STREAM,
-        config: {
-            durable_name: NATS_CONSUMER,
-            ack_policy: "explicit",
-        },
-    });
+    const consumer = await js.consumers.get(NATS_STREAM, NATS_CONSUMER);
     log.info(`[nats] bound to ${NATS_STREAM}/${NATS_CONSUMER}`);
 
-    // Main loop. fetch() resolves with up to PULL_BATCH_SIZE messages or
-    // after PULL_EXPIRES_MS — either way we just loop again.
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-        let iter;
-        try {
-            iter = await sub.fetch({
-                batch: PULL_BATCH_SIZE,
-                expires: PULL_EXPIRES_MS,
-            });
-        } catch (err) {
-            log.warn(`[nats] fetch error: ${err.message || err} — sleeping 2s`);
-            await new Promise(r => setTimeout(r, 2_000));
-            continue;
-        }
+    // consume() returns an async iterable that yields messages
+    // continuously. It keeps the pull loop alive across server
+    // reconnects and pulls in the background; we just iterate.
+    const messages = await consumer.consume({
+        max_messages: MAX_MESSAGES,
+        expires: EXPIRES_MS,
+    });
 
-        for await (const msg of iter) {
+    for await (const msg of messages) {
+        try {
             await handle(msg, { sendMessage, isReady, log });
+        } catch (err) {
+            // Defensive: nothing in handle() should throw, but if it
+            // does, leave the message unacked so JetStream redelivers
+            // after ack-wait (30s) rather than killing the consumer.
+            log.error(`[nats] unhandled error in handle(): ${err.message || err}`);
+            try { msg.nak(30_000); } catch (_) { /* already settled */ }
         }
     }
+
+    log.warn("[nats] consume iterator ended");
 }
 
 async function handle(msg, { sendMessage, isReady, log }) {
     const delivered = msg.info.deliveryCount;
     const msgId =
-        (msg.headers && msg.headers.get("Nats-Msg-Id")) || `seq-${msg.seq}`;
+        (msg.headers && typeof msg.headers.get === "function" && msg.headers.get("Nats-Msg-Id"))
+        || `seq-${msg.seq}`;
 
     let payload;
     try {
@@ -131,3 +135,5 @@ async function handle(msg, { sendMessage, isReady, log }) {
         msg.nak(delay);
     }
 }
+
+module.exports = { startNatsConsumer };
