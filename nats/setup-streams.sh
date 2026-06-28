@@ -43,8 +43,8 @@ stream_args=(
     --max-age 24h
     --max-msgs 10000
     --max-msg-size 16384
-    --max-bytes -1
-    --max-consumers -1
+    --max-bytes=-1
+    --max-consumers=-1
     --discard old
     --replicas 1
     --dupe-window 2m
