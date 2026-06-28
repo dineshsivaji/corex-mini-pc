@@ -70,8 +70,9 @@ Anyone (CLI, Python service, Node service) can publish to
 deliver it. Quick CLI test:
 
 ```bash
-docker exec -it nats nats pub notify.whatsapp \
-  '{"to":"<your jid or group>","text":"hello via NATS"}'
+# One-time: pull nats-box for its `nats` CLI
+docker run --rm --network host natsio/nats-box nats --server nats://127.0.0.1:4222 \
+  pub notify.whatsapp '{"to":"<your jid or group>","text":"hello via NATS"}'
 ```
 
 Full publish recipes — Python (`nats-py`), Node (`nats`), Nats-Msg-Id

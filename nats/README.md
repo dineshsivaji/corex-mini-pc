@@ -86,18 +86,26 @@ Suggested format: `<kind>-<event-timestamp>`, e.g. `power_cut-1719567890`.
 
 ## From the CLI (handy for testing and one-off alerts)
 
+The `nats:alpine` server image doesn't include the `nats` management
+CLI. Run it via a throwaway `natsio/nats-box` container. Easiest is
+a shell alias on the host:
+
+```bash
+alias nats='docker run --rm --network host natsio/nats-box nats --server nats://127.0.0.1:4222'
+```
+
+Then:
+
 ```bash
 # Send a one-off
-docker exec -it nats nats pub notify.whatsapp \
-  '{"to":"<your jid or group>","text":"hello from CLI"}'
+nats pub notify.whatsapp '{"to":"<your jid or group>","text":"hello from CLI"}'
 
 # With a Nats-Msg-Id (dedup-safe — repeating the command in <2m no-ops)
-docker exec -it nats nats pub notify.whatsapp \
-  '{"to":"<jid>","text":"only once"}' \
+nats pub notify.whatsapp '{"to":"<jid>","text":"only once"}' \
   -H "Nats-Msg-Id:manual-$(date +%s)"
 
 # Watch the consumer drain it
-docker exec -it nats nats consumer info NOTIFY whatsapp-bridge
+nats consumer info NOTIFY whatsapp-bridge
 ```
 
 ## From Python (`nats-py`) — pattern used by `power_daemon.py`
@@ -215,16 +223,16 @@ What happens to a published message:
 docker ps | grep nats
 curl -s http://localhost:8222/healthz                 # → "ok"
 
-# Stream + consumer present
-docker exec -it nats nats stream info NOTIFY
-docker exec -it nats nats consumer info NOTIFY whatsapp-bridge
+# Stream + consumer present (using the alias from above)
+nats stream info NOTIFY
+nats consumer info NOTIFY whatsapp-bridge
 
 # Inspect pending / redelivered
-docker exec -it nats nats consumer info NOTIFY whatsapp-bridge --json \
+nats consumer info NOTIFY whatsapp-bridge --json \
   | jq '{num_pending, num_redelivered, num_ack_pending}'
 
 # Peek at messages (non-destructive)
-docker exec -it nats nats stream view NOTIFY
+nats stream view NOTIFY
 ```
 
 ## Where the data lives

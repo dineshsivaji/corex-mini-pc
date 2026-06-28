@@ -135,8 +135,9 @@ and join the NATS compose network.
 #   [nats] connected to nats://127.0.0.1:4222
 #   [nats] bound to NOTIFY/whatsapp-bridge
 
-# Send a test from the host
-docker exec -it nats nats pub notify.whatsapp \
+# Send a test from the host (using the nats-box CLI container)
+docker run --rm --network host natsio/nats-box \
+  nats --server nats://127.0.0.1:4222 pub notify.whatsapp \
   '{"to":"<your group/jid>","text":"embedded consumer test"}'
 # → WhatsApp message arrives
 # → server log: "[nats] delivered msg_id=... delivered=1"
