@@ -1,0 +1,33 @@
+# NATS JetStream for notification transport.
+# Brought up on the Mini PC as part of the same Docker stack as HA,
+# WhatsApp API, etc. Bound to localhost only — no LAN exposure.
+#
+# Storage lives in a named Docker volume (nats-data) backed by the
+# boot SSD, NOT the USB-SATA HDD at /mnt/storage. JetStream does
+# sync writes; routing them over USB-SATA reintroduces the boot-race
+# problem that wait-for-storage.service was added to solve.
+
+services:
+  nats:
+    container_name: nats
+    image: nats:2.10-alpine
+    command:
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
+    ports:
+      - "127.0.0.1:4222:4222"   # client port (daemon, bridge)
+      - "127.0.0.1:8222:8222"   # monitoring (nats stream info, dashboards)
+    volumes:
+      - nats-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  nats-data:

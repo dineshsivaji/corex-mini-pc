@@ -15,14 +15,20 @@ Detection:
          as a network issue and skip shutdown (avoid false positives).
       2. Otherwise: confirmed grid failure → start shutdown sequence.
 
+Notification transport:
+    Daemon publishes pre-formatted WhatsApp messages to NATS JetStream
+    (subject `notify.whatsapp`). The WhatsApp server's in-process NATS
+    consumer pulls them and calls Baileys' sendMessage directly. JetStream
+    persists the message on the boot SSD so a Mini PC reboot or a
+    temporarily-disconnected WhatsApp socket does not lose the alert.
+
 Shutdown sequence:
-    1. Notify HA via webhook (fire-and-forget) → WhatsApp alert
+    1. Publish "power cut" message to NATS (sync — wait for JetStream ack)
     2. sync filesystem
     3. Set Tapo countdown(60s, off) — verify response, retry once on failure
     4. systemctl stop docker (graceful service shutdown)
     5. umount /mnt/storage (best-effort)
-    6. hdparm -y /dev/sda (park HDD heads cleanly — no "krik" sound)
-    7. shutdown -h now (Tapo cuts power 60s later)
+    6. shutdown -P now (Tapo cuts power 60s later)
 """
 
 import asyncio
@@ -32,10 +38,11 @@ import os
 import subprocess
 import sys
 import time
-import urllib.request
 from dataclasses import dataclass
 
+import nats
 from kasa import Credentials, Discover
+from nats.errors import TimeoutError as NatsTimeoutError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,14 +66,23 @@ class Config:
     tapo_email: str = "your_tapo_email@example.com"
     tapo_password: str = "your_tapo_password"
 
-    # HA webhook (local — same host)
-    ha_webhook_power_cut: str = "http://localhost:8123/api/webhook/power_cut_imminent"
-    ha_webhook_tapo_failed: str = "http://localhost:8123/api/webhook/tapo_command_failed"
-    ha_webhook_recovered: str = "http://localhost:8123/api/webhook/minipc_recovered"
+    # NATS JetStream — replaces direct HA webhook calls. The WhatsApp
+    # server's in-process consumer pulls from `notify.whatsapp` and
+    # forwards to Baileys.
+    nats_url: str = "nats://127.0.0.1:4222"
+    nats_subject: str = "notify.whatsapp"
+    nats_publish_timeout_sec: int = 5
+
+    # WhatsApp recipient (jid or group id). Used as the `to` field in the
+    # NATS payload that the consumer forwards verbatim to sendMessage().
+    whatsapp_to: str = "your_group_or_jid_here"
+
+    # Path to the YAML file with the 100 "Mini PC is X" status lines.
+    # Daemon now owns rotation (previously HA's counter.recovery_index).
+    quote_lines_path: str = "/opt/power-daemon/quote_lines.yaml"
 
     # State directory (overridden by systemd's STATE_DIRECTORY env var).
-    # Used to persist a "managed-shutdown" marker across reboots so the next
-    # daemon start can announce recovery + outage duration.
+    # Holds the managed-shutdown marker + the recovery-quote cursor.
     state_dir: str = "/var/lib/power-daemon"
 
     # Shutdown sequence
@@ -79,7 +95,6 @@ class Config:
     tapo_countdown_sec: int = 60
     ping_timeout_sec: int = 5
     ping_packet_count: int = 5  # Multiple packets to handle flaky WiFi smart plugs
-    webhook_timeout_sec: int = 2
 
 
 # --- Network checks ---
@@ -131,68 +146,135 @@ async def is_real_outage(config: Config) -> bool:
     return True
 
 
-# --- HA webhook (fire-and-forget) ---
+# --- Quote rotation (moved from HA's counter.recovery_index) ---
 
 
-def fire_webhook(url: str, payload: dict, timeout: int) -> bool:
-    """POST to HA webhook. Returns True on 2xx, False otherwise. Never raises."""
+def load_quotes(path: str) -> list[str]:
+    """
+    Parse the bundled quote_lines.yaml. Same file that HA used to !include,
+    but with a stdlib-only parser so we don't pull PyYAML into the daemon.
+    Format expected: `- "text"` per line, plus comments / blanks.
+    """
+    quotes: list[str] = []
     try:
-        body = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return 200 <= resp.status < 300
+        with open(path) as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#") or not s.startswith("- "):
+                    continue
+                v = s[2:].strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                    v = v[1:-1]
+                quotes.append(v)
     except Exception as e:
-        log.warning(f"Webhook {url} failed: {e}")
+        log.warning(f"Could not load quotes from {path}: {e}")
+    if not quotes:
+        quotes = ["Mini PC is back online"]
+    return quotes
+
+
+def next_quote(config: Config, quotes: list[str]) -> str:
+    """Read cursor from state_dir/recovery_cursor, return quotes[cursor % N], advance."""
+    cursor_path = os.path.join(config.state_dir, "recovery_cursor")
+    cursor = 0
+    try:
+        with open(cursor_path) as f:
+            cursor = int(f.read().strip() or "0")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log.warning(f"Cursor read error ({cursor_path}): {e}")
+    idx = cursor % len(quotes)
+    try:
+        with open(cursor_path, "w") as f:
+            f.write(str(cursor + 1))
+    except Exception as e:
+        log.warning(f"Cursor write error ({cursor_path}): {e}")
+    return quotes[idx]
+
+
+# --- NATS publish ---------------------------------------------------------
+
+
+async def publish(js, config: Config, text: str, kind: str, dedup_key: str) -> bool:
+    """
+    Publish a WhatsApp notification to JetStream. Blocks until the server
+    acks the publish (which is what makes this durable). Returns False on
+    timeout/error; the caller should log but continue — losing one alert
+    is preferable to blocking shutdown forever.
+
+    `dedup_key` uses NATS' built-in deduplication window (stream config:
+    dupe-window 2m) so a retry storm during shutdown doesn't double-send.
+    """
+    payload = json.dumps({"to": config.whatsapp_to, "text": text}).encode()
+    msg_id = f"{kind}-{dedup_key}"
+    try:
+        await asyncio.wait_for(
+            js.publish(
+                config.nats_subject,
+                payload,
+                headers={"Nats-Msg-Id": msg_id, "X-Kind": kind},
+            ),
+            timeout=config.nats_publish_timeout_sec,
+        )
+        log.info(f"NATS publish ok [kind={kind} msg_id={msg_id}]")
+        return True
+    except (NatsTimeoutError, asyncio.TimeoutError):
+        log.error(f"NATS publish timeout [kind={kind} msg_id={msg_id}]")
+        return False
+    except Exception as e:
+        log.error(f"NATS publish failed [kind={kind} msg_id={msg_id}]: {e}")
         return False
 
 
-async def maybe_send_recovery_notification(config: Config) -> None:
+async def maybe_send_recovery_notification(js, config: Config, quotes: list[str]) -> None:
     """
-    On daemon startup, fire a "Mini PC back online" webhook to HA.
+    On daemon startup, publish a "Mini PC back online" message to NATS.
     If a managed-shutdown marker exists with a fresh-but-not-too-fresh mtime
-    (30s..24h), include the outage duration. Otherwise just notify presence.
+    (30s..24h), include the outage duration. Otherwise just announce presence.
 
-    Retries for up to 2 minutes since HA may still be initializing inside
-    Docker right after a power-restore boot.
+    Retries for up to 2 minutes since the publish itself can race with NATS
+    container warm-up after a power-restore boot. Once published, the
+    WhatsApp server's consumer + JetStream redelivery handle the rest.
     """
     marker = os.path.join(config.state_dir, "managed-shutdown")
-    duration_min = None
+    duration_min: int | None = None
+    marker_mtime: float | None = None
 
     try:
-        elapsed = time.time() - os.stat(marker).st_mtime
+        marker_mtime = os.stat(marker).st_mtime
+        elapsed = time.time() - marker_mtime
         if elapsed < 30:
-            log.info("Marker too fresh (daemon restart) — skipping recovery webhook")
+            log.info("Marker too fresh (daemon restart) — skipping recovery notification")
             return
         if 30 <= elapsed <= 86400:
             duration_min = int(elapsed / 60)
-        # else: stale (>24h) — keep duration_min = None
         try:
             os.remove(marker)
         except Exception as e:
             log.warning(f"Could not delete marker {marker}: {e}")
     except FileNotFoundError:
-        pass  # No marker → manual reboot / first boot
+        pass  # Manual reboot / first boot
     except Exception as e:
         log.warning(f"State marker read error: {e}")
 
-    payload = {"reason": "minipc_back_online"}
+    flavor = next_quote(config, quotes)
+    now = time.strftime("%H:%M")
     if duration_min is not None:
-        payload["outage_minutes"] = duration_min
+        text = f"🟢 {flavor} at {now} (after {duration_min} min outage)."
+    else:
+        text = f"🟢 {flavor} at {now}."
+
+    # Dedup key: marker mtime if present (one notification per outage),
+    # else daemon-start time bucketed to the second.
+    dedup_key = str(int(marker_mtime if marker_mtime else time.time()))
 
     deadline = time.time() + 120
     while time.time() < deadline:
-        if fire_webhook(
-            config.ha_webhook_recovered, payload, config.webhook_timeout_sec
-        ):
-            log.info(f"Recovery webhook delivered (duration_min={duration_min})")
+        if await publish(js, config, text, "recovered", dedup_key):
             return
         await asyncio.sleep(5)
-    log.warning("Recovery webhook never reached HA within 120s; giving up")
+    log.warning("Recovery NATS publish never succeeded within 120s; giving up")
 
 
 # --- Tapo control ---
@@ -228,8 +310,8 @@ async def set_tapo_countdown(config: Config) -> bool:
         return False
 
 
-async def set_tapo_countdown_with_retry(config: Config) -> bool:
-    """Attempt Tapo countdown twice. Alert HA on persistent failure."""
+async def set_tapo_countdown_with_retry(js, config: Config, event_ts: int) -> bool:
+    """Attempt Tapo countdown twice. Alert via NATS on persistent failure."""
     for attempt in (1, 2):
         if await set_tapo_countdown(config):
             return True
@@ -239,13 +321,13 @@ async def set_tapo_countdown_with_retry(config: Config) -> bool:
 
     log.critical(
         "Tapo countdown failed after retries — UPS may drain. "
-        "Notifying HA and proceeding with shutdown anyway."
+        "Notifying via NATS and proceeding with shutdown anyway."
     )
-    fire_webhook(
-        config.ha_webhook_tapo_failed,
-        {"reason": "countdown_command_failed_twice"},
-        config.webhook_timeout_sec,
+    text = (
+        "⚠️ Tapo countdown command FAILED. UPS may drain — Mini PC shutdown "
+        "will proceed but HDD power won't auto-cut."
     )
+    await publish(js, config, text, "tapo_failed", str(event_ts))
     return False
 
 
@@ -273,9 +355,10 @@ def run_cmd(cmd: list[str], description: str) -> bool:
         return False
 
 
-async def execute_shutdown_sequence(config: Config) -> None:
+async def execute_shutdown_sequence(js, config: Config) -> None:
     """Pre-shutdown sequence + final shutdown command. Does not return."""
     log.critical("=== POWER FAILURE: starting shutdown sequence ===")
+    event_ts = int(time.time())
 
     # Step 0: drop a marker so the next boot can announce the outage
     # duration via the recovery notification.
@@ -287,37 +370,36 @@ async def execute_shutdown_sequence(config: Config) -> None:
     except Exception as e:
         log.warning(f"Could not write state marker {marker}: {e}")
 
-    # 1. Notify HA → WhatsApp (fire-and-forget)
-    log.info("Step 1/7: Notifying HA webhook")
-    fire_webhook(
-        config.ha_webhook_power_cut,
-        {"reason": "zeb_unreachable_5min"},
-        config.webhook_timeout_sec,
+    # 1. Publish "power cut" to NATS — blocks until JetStream acks.
+    # Durable: even if the WhatsApp socket is down right now, the
+    # message survives the reboot and gets delivered when it returns.
+    log.info("Step 1/6: NATS publish power_cut")
+    await publish(
+        js,
+        config,
+        "🔌 Power cut detected. Mini PC shutting down (Tapo cuts in 60s).",
+        "power_cut",
+        str(event_ts),
     )
 
     # 2. Sync filesystem
-    log.info("Step 2/7: sync")
+    log.info("Step 2/6: sync")
     run_cmd(["sync"], "sync")
 
-    # 3. Set Tapo countdown (with retry)
-    log.info(f"Step 3/7: Tapo countdown {config.tapo_countdown_sec}s")
-    await set_tapo_countdown_with_retry(config)
+    # 3. Set Tapo countdown (with retry; tapo_failed alert via NATS inside)
+    log.info(f"Step 3/6: Tapo countdown {config.tapo_countdown_sec}s")
+    await set_tapo_countdown_with_retry(js, config, event_ts)
 
     # 4. Stop Docker (graceful container shutdown)
-    log.info("Step 4/7: systemctl stop docker")
+    log.info("Step 4/6: systemctl stop docker")
     run_cmd(["sudo", "systemctl", "stop", "docker"], "stop docker")
 
     # 5. Unmount HDD (best-effort)
-    log.info(f"Step 5/7: umount {config.storage_mount}")
+    log.info(f"Step 5/6: umount {config.storage_mount}")
     run_cmd(["sudo", "umount", config.storage_mount], "umount")
 
-    # 6. Park HDD heads (STANDBY — heads parked but drive still responds,
-    # avoids 5-min USB timeout that -Y/SLEEP causes during shutdown)
-    #log.info(f"Step 6/7: hdparm -y {config.hdd_device}")
-    #run_cmd(["sudo", "hdparm", "-y", config.hdd_device], "hdparm -y")
-
-    # 7. Final shutdown
-    log.critical("Step 7/7: shutdown -P now — system going down")
+    # 6. Final shutdown
+    log.critical("Step 6/6: shutdown -P now — system going down")
     # Flush log handlers so the above line reaches journald before the OS halts
     for handler in log.handlers:
         handler.flush()
@@ -328,46 +410,79 @@ async def execute_shutdown_sequence(config: Config) -> None:
 # --- Main loop ---
 
 
+async def connect_nats(config: Config):
+    """
+    Connect to NATS with retries. Returns (nc, js). NATS' client auto-
+    reconnects after this, so we only handle the first connection.
+    """
+    deadline = time.time() + 120
+    last_err: Exception | None = None
+    while time.time() < deadline:
+        try:
+            nc = await nats.connect(
+                servers=[config.nats_url],
+                name="power-daemon",
+                max_reconnect_attempts=-1,
+                reconnect_time_wait=2,
+            )
+            js = nc.jetstream()
+            log.info(f"Connected to NATS at {config.nats_url}")
+            return nc, js
+        except Exception as e:
+            last_err = e
+            log.warning(f"NATS connect failed ({e!r}); retrying in 5s")
+            await asyncio.sleep(5)
+    raise RuntimeError(f"NATS unreachable for 120s: {last_err!r}")
+
+
 async def run(config: Config) -> None:
     consecutive_failures = 0
     log.info(
-        f"Power daemon started. Beacon={config.zeb_sp110_ip} "
+        f"Power daemon starting. Beacon={config.zeb_sp110_ip} "
         f"gateway={config.gateway_ip} threshold={config.failure_threshold_sec}s"
     )
 
-    # Fire recovery / startup notification in the background — does not block
-    # the watchdog loop.
-    asyncio.ensure_future(maybe_send_recovery_notification(config))
+    quotes = load_quotes(config.quote_lines_path)
+    log.info(f"Loaded {len(quotes)} status lines from {config.quote_lines_path}")
 
-    while True:
-        alive = await ping(
-            config.zeb_sp110_ip, config.ping_timeout_sec, config.ping_packet_count
-        )
+    nc, js = await connect_nats(config)
+    try:
+        # Recovery / startup notification — runs in the background so the
+        # watchdog loop starts immediately.
+        asyncio.ensure_future(maybe_send_recovery_notification(js, config, quotes))
 
-        if alive:
-            if consecutive_failures > 0:
-                log.info(
-                    f"Zeb back online after "
-                    f"{consecutive_failures * config.ping_interval_sec}s"
-                )
-            consecutive_failures = 0
-        else:
-            consecutive_failures += 1
-            elapsed = consecutive_failures * config.ping_interval_sec
-            log.warning(
-                f"Zeb offline {elapsed}s / {config.failure_threshold_sec}s"
+        while True:
+            alive = await ping(
+                config.zeb_sp110_ip, config.ping_timeout_sec, config.ping_packet_count
             )
 
-            if elapsed >= config.failure_threshold_sec:
-                # Sanity check before initiating shutdown
-                if await is_real_outage(config):
-                    await execute_shutdown_sequence(config)
-                    return  # shutdown called; exit loop
-                # Network glitch detected — reset counter, keep monitoring
-                log.info("Resetting counter due to network sanity check")
+            if alive:
+                if consecutive_failures > 0:
+                    log.info(
+                        f"Zeb back online after "
+                        f"{consecutive_failures * config.ping_interval_sec}s"
+                    )
                 consecutive_failures = 0
+            else:
+                consecutive_failures += 1
+                elapsed = consecutive_failures * config.ping_interval_sec
+                log.warning(
+                    f"Zeb offline {elapsed}s / {config.failure_threshold_sec}s"
+                )
 
-        await asyncio.sleep(config.ping_interval_sec)
+                if elapsed >= config.failure_threshold_sec:
+                    if await is_real_outage(config):
+                        await execute_shutdown_sequence(js, config)
+                        return  # shutdown called; exit loop
+                    log.info("Resetting counter due to network sanity check")
+                    consecutive_failures = 0
+
+            await asyncio.sleep(config.ping_interval_sec)
+    finally:
+        try:
+            await nc.drain()
+        except Exception:
+            pass
 
 
 def load_config_from_env() -> Config:
@@ -375,12 +490,12 @@ def load_config_from_env() -> Config:
     config = Config()
     string_fields = (
         "zeb_sp110_ip", "gateway_ip", "tapo_ip", "tapo_email", "tapo_password",
-        "ha_webhook_power_cut", "ha_webhook_tapo_failed", "ha_webhook_recovered",
+        "nats_url", "nats_subject", "whatsapp_to", "quote_lines_path",
         "hdd_device", "storage_mount", "state_dir",
     )
     int_fields = (
         "ping_interval_sec", "failure_threshold_sec", "tapo_countdown_sec",
-        "ping_timeout_sec", "ping_packet_count", "webhook_timeout_sec",
+        "ping_timeout_sec", "ping_packet_count", "nats_publish_timeout_sec",
     )
     for field_name in string_fields:
         env_key = f"POWER_DAEMON_{field_name.upper()}"

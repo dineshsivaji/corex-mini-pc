@@ -1,6 +1,13 @@
 # Power-automation HA automations.
 # Append the contents below to your automations.yaml (or use !include_dir_merge_list).
 # WhatsApp phone number is read from secrets.yaml as `whatsapp_phone`.
+#
+# Three former entries (Power Cut Imminent, Tapo Command Failed, Mini PC
+# Recovered) were removed when the power-daemon was migrated to publish
+# those notifications directly to NATS JetStream. The daemon now formats
+# the messages itself (including the "Mini PC is X" rotating status line)
+# and ships them via the WhatsApp server's in-process NATS consumer.
+# `counter.recovery_index` in configuration.yaml is now unused.
 
 # 1. ESP32 sends a heartbeat hourly. Update last-seen timestamp.
 - alias: ESP32 Heartbeat Receiver
@@ -43,42 +50,7 @@
               | round(1) }}h ago).
   mode: single
 
-# 3. Mini PC daemon detected power cut and is initiating shutdown.
-- alias: Power Cut Imminent
-  description: WhatsApp alert when Mini PC starts shutdown sequence.
-  triggers:
-    - trigger: webhook
-      webhook_id: power_cut_imminent
-      allowed_methods:
-        - POST
-      local_only: true
-  actions:
-    - action: shell_command.whatsapp_alert
-      data:
-        to: !secret whatsapp_phone
-        message: >-
-          🔌 Power cut detected. Mini PC shutting down (Tapo cuts in 60s).
-  mode: single
-
-# 4. Mini PC daemon's Tapo countdown command failed.
-- alias: Tapo Command Failed
-  description: Alert when daemon could not set Tapo countdown.
-  triggers:
-    - trigger: webhook
-      webhook_id: tapo_command_failed
-      allowed_methods:
-        - POST
-      local_only: true
-  actions:
-    - action: shell_command.whatsapp_alert
-      data:
-        to: !secret whatsapp_phone
-        message: >-
-          ⚠️ Tapo countdown command FAILED. UPS may drain — Mini PC shutdown
-          will proceed but HDD power won't auto-cut.
-  mode: single
-
-# 5. Mini PC stays unreachable while Tapo is ON (boot failure / hung).
+# 3. Mini PC stays unreachable while Tapo is ON (boot failure / hung).
 - alias: Mini PC Stuck Alert
   description: Alert when Tapo is on but Mini PC won't come up.
   triggers:
@@ -94,34 +66,4 @@
         message: >-
           ⚠️ Mini PC unreachable but Tapo is ON. Possible boot failure —
           investigate.
-  mode: single
-
-# 6. Mini PC power-daemon started — sends recovery / startup notification.
-#    Includes outage_minutes when daemon-managed shutdown preceded the boot;
-#    plain "up" message for manual reboots / first install.
-#    Appends one of 100 funny status lines (rotated via counter.recovery_index).
-- alias: Mini PC Recovered
-  description: WhatsApp alert when power-daemon starts on Mini PC.
-  triggers:
-    - trigger: webhook
-      webhook_id: minipc_recovered
-      allowed_methods:
-        - POST
-      local_only: true
-  variables:
-    lines: !include quote_lines.yaml
-    idx: "{{ states('counter.recovery_index') | int(0) % (lines | length) }}"
-    flavor: "{{ lines[idx | int] }}"
-  actions:
-    - action: counter.increment
-      target:
-        entity_id: counter.recovery_index
-    - action: shell_command.whatsapp_alert
-      data:
-        to: !secret whatsapp_phone
-        message: >-
-          🟢 {{ flavor }} at {{ now().strftime('%H:%M') }}
-          {%- if trigger.json.outage_minutes is defined %}
-          (after {{ trigger.json.outage_minutes }} min outage)
-          {%- endif -%}.
   mode: single

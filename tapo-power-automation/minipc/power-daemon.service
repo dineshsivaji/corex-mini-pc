@@ -1,29 +1,33 @@
 [Unit]
 Description=Power Failure Detection Daemon
-# Wait for the network, Docker, and storage so the recovery WhatsApp
-# notification (which goes via HA → WhatsApp API, both running in
-# Docker on this host) actually has a working endpoint by the time
-# the daemon fires it.
+# Need network up, Docker up (NATS runs as a container), and storage so
+# the JetStream named volume on the boot SSD is reachable. Recovery
+# notification goes via NATS → WhatsApp server's in-process consumer;
+# the daemon itself only needs NATS to be reachable.
 After=network-online.target docker.service wait-for-storage.service
 Wants=network-online.target docker.service wait-for-storage.service
 
 [Service]
 Type=simple
 EnvironmentFile=-/etc/default/power-daemon
-# Block until HA's port (8123) responds. Polls every 5s for up to ~5 min.
-# `exit 0` at the end means we proceed even if HA never comes up — power
-# monitoring is more important than the recovery notification.
-#ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do (echo > /dev/tcp/localhost/8123) 2>/dev/null && echo "HA reachable after $((i*5))s" && exit 0; sleep 5; done; echo "HA never reachable in 300s, starting daemon anyway"; exit 0'
-ExecStartPre=/bin/bash -c 'echo "Waiting for HA..."; for i in $(seq 1 60); do (echo > /dev/tcp/localhost/8123) 2>/dev/null && echo "HA reachable after $((i*5))s" && break; sleep 5; done;
-  echo "Waiting for WhatsApp API /health (max 60s)..."; for i in $(seq 1 12); do curl -fsS --max-time 3 http://localhost:3001/health >/dev/null 2>&1 && echo "WhatsApp healthy after
-  $((i*5))s" && exit 0; sleep 5; done; echo "WhatsApp not healthy in 60s, starting anyway"; exit 0'
+# Block until NATS' client port responds. Polls every 2s for up to ~2 min.
+# We exit 0 regardless — losing one alert is preferable to refusing to
+# start the watchdog. If NATS is genuinely down the daemon's publish
+# will fail-with-log and the shutdown sequence proceeds anyway.
+ExecStartPre=/bin/bash -c 'echo "Waiting for NATS (port 4222)..."; \
+  for i in $(seq 1 60); do \
+    (echo > /dev/tcp/localhost/4222) 2>/dev/null \
+    && echo "NATS reachable after $((i*2))s" && exit 0; \
+    sleep 2; \
+  done; \
+  echo "NATS not reachable in 120s, starting daemon anyway"; exit 0'
 ExecStart=/opt/power-daemon/.venv/bin/python /opt/power-daemon/power_daemon.py
 Restart=always
 RestartSec=10
 User=dinesh
 StateDirectory=power-daemon
-# Default systemd start timeout is 90s; we need 5 min for the HA wait.
-TimeoutStartSec=400
+# Default systemd start timeout is 90s; we wait up to 120s for NATS.
+TimeoutStartSec=200
 
 [Install]
 WantedBy=multi-user.target
