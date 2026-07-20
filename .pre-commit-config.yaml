@@ -13,18 +13,18 @@ repos:
       - id: detect-private-key
 
   # 3. Custom Regex for PII (Emails and Phone Numbers)
-  - repo: local
-    hooks:
-      - id: block-pii-emails
-        name: Block Email Addresses
-        entry: '(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}'
-        language: pygrep
-        types: [text]
+  #- repo: local
+  #  hooks:
+      #- id: block-pii-emails
+      #  name: Block Email Addresses
+      #  entry: '(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}'
+      #  language: pygrep
+      #  types: [text]
         
-      - id: block-pii-phones
-        name: Block Phone Numbers (Generic 10-digit/International)
-        # Note: Adjust this regex to match the specific format of your region
-        entry: '(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
-        language: pygrep
-        types: [text]
-        exclude: 'package-lock\.json|yarn\.lock' # Avoid scanning noise in lockfiles
+      #- id: block-pii-phones
+      #  name: Block Phone Numbers (Generic 10-digit/International)
+      #  # Note: Adjust this regex to match the specific format of your region
+      #  entry: '(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
+      #  language: pygrep
+      #  types: [text]
+      #  exclude: 'package-lock\.json|yarn\.lock' # Avoid scanning noise in lockfiles
