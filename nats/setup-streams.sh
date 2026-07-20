@@ -42,7 +42,7 @@ stream_args=(
     --retention work
     --max-age 24h
     --max-msgs 10000
-    --max-msg-size 16384
+    --max-msg-size 8388608
     --max-bytes=-1
     --max-consumers=-1
     --discard old
@@ -89,5 +89,39 @@ else
     nats_cli consumer update NOTIFY whatsapp-bridge "${consumer_update_args[@]}"
 fi
 
-echo "NOTIFY stream + whatsapp-bridge consumer ready."
+# --- Media consumer -------------------------------------------------------
+#
+# `whatsapp-media` is a separate durable pull consumer for binary
+# attachments on `notify.whatsapp.media`. Kept distinct from the text
+# consumer so a slow/large media send can't stall text alerts. NATS
+# subject matching is exact, so the `notify.whatsapp` filter above does
+# NOT capture `notify.whatsapp.media` — hence this second consumer.
+
+media_add_args=(
+    --filter "notify.whatsapp.media"
+    --ack explicit
+    --pull
+    --deliver all
+    --max-deliver 10
+    --wait 30s
+    --replay instant
+    --defaults
+)
+
+media_update_args=(
+    --filter "notify.whatsapp.media"
+    --ack explicit
+    --max-deliver 10
+    --wait 30s
+    --replay instant
+    --defaults
+)
+
+if ! nats_cli consumer info NOTIFY whatsapp-media >/dev/null 2>&1; then
+    nats_cli consumer add NOTIFY whatsapp-media "${media_add_args[@]}"
+else
+    nats_cli consumer update NOTIFY whatsapp-media "${media_update_args[@]}"
+fi
+
+echo "NOTIFY stream + whatsapp-bridge + whatsapp-media consumers ready."
 nats_cli stream info NOTIFY

@@ -17,12 +17,15 @@ services:
       - "/data"
       - "-m"
       - "8222"
+      - "--max_payload=8388608"   # 8 MB — headroom for media on notify.whatsapp.media
     ports:
-      - "127.0.0.1:4222:4222"   # client port (daemon, bridge)
+      - "127.0.0.1:4222:4222"   # host access (power-daemon systemd service)
       - "127.0.0.1:8222:8222"   # monitoring (nats stream info, dashboards)
     volumes:
       - nats-data:/data
     restart: unless-stopped
+    networks:
+      - mini-net
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
       interval: 10s
@@ -31,3 +34,7 @@ services:
 
 volumes:
   nats-data:
+
+networks:
+  mini-net:
+    external: true
