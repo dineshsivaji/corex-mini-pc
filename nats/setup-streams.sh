@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# setup-streams.sh — Create/update the NOTIFY stream and whatsapp-bridge
-# consumer. Idempotent: run as many times as you want; converges to the
-# definition below.
+# setup-streams.sh — Create/update the NOTIFY stream and its consumers.
+# Idempotent: safe to run repeatedly.
 #
 # The nats:alpine server image does NOT include the `nats` management CLI.
 # That CLI lives in the separate `natsio/nats-box` image. We pull a tiny
@@ -32,11 +31,12 @@ nats_cli() {
 
 # --- Stream ---------------------------------------------------------------
 #
-# `--defaults` accepts defaults for any options we don't pin explicitly,
-# so we don't get prompted for niche fields. We try `add` first; if the
-# stream already exists, fall through to `update`.
+# `--storage` is a CREATE-time-only property; `nats stream update` rejects
+# it ("unknown long flag '--storage'"). So the create path sets storage and
+# the update path passes only mutable fields (which includes --max-msg-size,
+# the whole reason we re-run this — to raise it to 8 MB for media).
 
-stream_args=(
+stream_add_args=(
     --subjects "notify.>"
     --storage file
     --retention work
@@ -51,77 +51,60 @@ stream_args=(
     --defaults
 )
 
+stream_update_args=(
+    --subjects "notify.>"
+    --retention work
+    --max-age 24h
+    --max-msgs 10000
+    --max-msg-size 8388608
+    --max-bytes=-1
+    --max-consumers=-1
+    --discard old
+    --replicas 1
+    --dupe-window 2m
+    -f
+)
+
 if ! nats_cli stream info NOTIFY >/dev/null 2>&1; then
-    nats_cli stream add NOTIFY "${stream_args[@]}"
+    echo "Creating stream NOTIFY..."
+    nats_cli stream add NOTIFY "${stream_add_args[@]}"
 else
-    nats_cli stream update NOTIFY "${stream_args[@]}"
+    echo "Updating stream NOTIFY (mutable fields only)..."
+    nats_cli stream update NOTIFY "${stream_update_args[@]}"
 fi
 
-# --- Consumer -------------------------------------------------------------
+# --- Consumers ------------------------------------------------------------
 #
-# `whatsapp-bridge` is a durable pull consumer. The WhatsApp server's
-# in-process subscriber binds to it, so messages persist across server
-# restarts.
-
-consumer_add_args=(
-    --filter "notify.whatsapp"
-    --ack explicit
-    --pull
-    --deliver all
-    --max-deliver 10
-    --wait 30s
-    --replay instant
-    --defaults
-)
-
-consumer_update_args=(
-    --filter "notify.whatsapp"
-    --ack explicit
-    --max-deliver 10
-    --wait 30s
-    --replay instant
-    --defaults
-)
-
-if ! nats_cli consumer info NOTIFY whatsapp-bridge >/dev/null 2>&1; then
-    nats_cli consumer add NOTIFY whatsapp-bridge "${consumer_add_args[@]}"
-else
-    nats_cli consumer update NOTIFY whatsapp-bridge "${consumer_update_args[@]}"
-fi
-
-# --- Media consumer -------------------------------------------------------
+# Consumer config is largely immutable after creation (ack policy, replay,
+# deliver, filter subject, pull/push). Rather than risk an "unknown flag" or
+# "cannot change" error on update, we create-if-missing and otherwise leave
+# the consumer as-is. To change a consumer's fixed config, delete + re-run.
 #
-# `whatsapp-media` is a separate durable pull consumer for binary
-# attachments on `notify.whatsapp.media`. Kept distinct from the text
-# consumer so a slow/large media send can't stall text alerts. NATS
-# subject matching is exact, so the `notify.whatsapp` filter above does
-# NOT capture `notify.whatsapp.media` — hence this second consumer.
+#   whatsapp-bridge → notify.whatsapp        (text)
+#   whatsapp-media  → notify.whatsapp.media  (binary attachments)
+# NATS subject matching is exact, so `notify.whatsapp` does NOT capture
+# `notify.whatsapp.media` — hence two distinct consumers.
 
-media_add_args=(
-    --filter "notify.whatsapp.media"
-    --ack explicit
-    --pull
-    --deliver all
-    --max-deliver 10
-    --wait 30s
-    --replay instant
-    --defaults
-)
+ensure_consumer() {
+    local name="$1" filter="$2"
+    if nats_cli consumer info NOTIFY "$name" >/dev/null 2>&1; then
+        echo "Consumer $name already exists — leaving as-is."
+        return 0
+    fi
+    echo "Creating consumer $name (filter: $filter)..."
+    nats_cli consumer add NOTIFY "$name" \
+        --filter "$filter" \
+        --ack explicit \
+        --pull \
+        --deliver all \
+        --max-deliver 10 \
+        --wait 30s \
+        --replay instant \
+        --defaults
+}
 
-media_update_args=(
-    --filter "notify.whatsapp.media"
-    --ack explicit
-    --max-deliver 10
-    --wait 30s
-    --replay instant
-    --defaults
-)
-
-if ! nats_cli consumer info NOTIFY whatsapp-media >/dev/null 2>&1; then
-    nats_cli consumer add NOTIFY whatsapp-media "${media_add_args[@]}"
-else
-    nats_cli consumer update NOTIFY whatsapp-media "${media_update_args[@]}"
-fi
+ensure_consumer whatsapp-bridge "notify.whatsapp"
+ensure_consumer whatsapp-media  "notify.whatsapp.media"
 
 echo "NOTIFY stream + whatsapp-bridge + whatsapp-media consumers ready."
 nats_cli stream info NOTIFY
