@@ -12,17 +12,14 @@ services:
     container_name: nats
     image: nats:2.10-alpine
     command:
-      - "-js"
-      - "-sd"
-      - "/data"
-      - "-m"
-      - "8222"
-      - "--max_payload=8388608"   # 8 MB — headroom for media on notify.whatsapp.media
+      - "-c"
+      - "/etc/nats/nats.conf"   # port, http_port, max_payload, jetstream all set here
     ports:
       - "127.0.0.1:4222:4222"   # host access (power-daemon systemd service)
       - "127.0.0.1:8222:8222"   # monitoring (nats stream info, dashboards)
     volumes:
       - nats-data:/data
+      - ./nats.conf:/etc/nats/nats.conf:ro
     restart: unless-stopped
     networks:
       - mini-net
