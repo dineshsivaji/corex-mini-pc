@@ -12,26 +12,29 @@ services:
     container_name: nats
     image: nats:2.10-alpine
     command:
-      - "-c"
-      - "/etc/nats/nats.conf"   # port, http_port, max_payload, jetstream all set here
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
     ports:
-      - "127.0.0.1:4222:4222"   # host access (power-daemon systemd service)
+      - "127.0.0.1:4222:4222"   # client port (daemon, bridge)
       - "127.0.0.1:8222:8222"   # monitoring (nats stream info, dashboards)
     volumes:
       - nats-data:/data
-      - ./nats.conf:/etc/nats/nats.conf:ro
     restart: unless-stopped
-    networks:
-      - mini-net
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
       interval: 10s
       timeout: 3s
       retries: 5
+    networks:                  
+     - mini-net                
 
 volumes:
   nats-data:
 
-networks:
-  mini-net:
-    external: true
+
+networks:                      
+  mini-net:                     
+    external: true               
