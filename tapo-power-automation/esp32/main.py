@@ -36,12 +36,12 @@ import urequests
 WIFI_SSID = "wifi_ssd"
 WIFI_PASSWORD = "wifi_pass"
 
-TAPO_IP = "192.168.1.111"
-TAPO_EMAIL = "email"
-TAPO_PASSWORD = "pass"
+TAPO_IP = "192.168.1.110"
+TAPO_EMAIL = "007007dinesh@gmail.com"
+TAPO_PASSWORD = "DEayyE3s2pr@cUbM"
 
 MINI_PC_IP = "192.168.1.50"
-MINI_PC_PORT = 22
+MINI_PC_PORT = 2222
 
 # Zeb SP110 — used as "is mains stable?" check before turning Tapo on.
 # If unreachable, mains may be flickering; defer the turn-on attempt.
@@ -62,10 +62,14 @@ WIFI_RETRY_INTERVAL = 10
 WIFI_MAX_RETRIES = 30  # 5 minutes
 HEARTBEAT_INTERVAL_SEC = 3600  # 1 hour
 STUCK_ALERT_THRESHOLD_SEC = 600  # 10 min: Tapo ON + Mini PC down → boot failure
+STUCK_RECOVER_SEC = 300
 WDT_TIMEOUT_MS = 120000  # 2 minutes
 NTP_RETRY_DELAY_SEC = 5
 IST_OFFSET_SEC = 5 * 3600 + 30 * 60  # India Standard Time = UTC+5:30
 WEBHOOK_TIMEOUT_SEC = 3
+HALTED_MAX_MW = 4000         # TUNE from step 1
+MAX_RECOVERY_CYCLES = 2      # per down-episode
+CYCLE_OFF_SEC = 10
 
 # Pre-computed auth hash (constant for given credentials)
 AUTH_HASH = hashlib.sha256(
@@ -186,241 +190,454 @@ def sha256(data):
     return hashlib.sha256(data).digest()
 
 
-# --- HTTP over persistent socket ---
+# --- HTTP / KLAP transport ---
+#
+# The KLAP encryption session is kept independently from the TCP connection.
+# This is closer to python-kasa: the TP_SESSIONID + derived crypto state are
+# reusable, while each HTTP request gets a fresh short-lived TCP socket.  The
+# latter is intentional on MicroPython: it avoids reusing a half-closed/stale
+# keep-alive socket after the Tapo has silently closed it.
+
+KLAP_HTTP_TIMEOUT_SEC = 10
+KLAP_RETRY_DELAY_SEC = 1
+KLAP_DEFAULT_SESSION_SEC = 24 * 60 * 60
+KLAP_SESSION_EXPIRY_BUFFER_SEC = 20 * 60
+
+_KLAP_SESSION = None
+
 
 def parse_http_response(raw):
-    """Parse HTTP response into status code, headers dict, and body."""
+    """Parse an HTTP response into (status, headers, body)."""
     header_end = raw.find(b"\r\n\r\n")
-    if header_end == -1:
-        return 0, {}, b""
+    if header_end < 0:
+        raise OSError("HTTP response missing header terminator")
 
     header_part = raw[:header_end]
     body = raw[header_end + 4:]
-
     lines = header_part.split(b"\r\n")
-    status_code = int(lines[0].split(b" ")[1])
+    if not lines or len(lines[0].split(b" ")) < 2:
+        raise OSError("Malformed HTTP status line")
+
+    try:
+        status_code = int(lines[0].split(b" ")[1])
+    except (ValueError, IndexError):
+        raise OSError("Invalid HTTP status code")
 
     headers = {}
     for line in lines[1:]:
-        if b": " in line:
-            k, v = line.split(b": ", 1)
-            key = k.lower()
-            if key in headers:
-                headers[key] = headers[key] + b", " + v
-            else:
-                headers[key] = v
+        if b":" not in line:
+            continue
+        k, v = line.split(b":", 1)
+        key = k.strip().lower()
+        value = v.strip()
+        if key in headers:
+            headers[key] = headers[key] + b", " + value
+        else:
+            headers[key] = value
 
     return status_code, headers, body
 
 
 def read_response(s):
-    """Read HTTP response from a keep-alive socket."""
+    """Read one HTTP response robustly from a short-lived TCP connection."""
     response = b""
 
+    # Read until the complete HTTP header is present.
     while b"\r\n\r\n" not in response:
         chunk = s.recv(1024)
         if not chunk:
-            break
+            raise OSError("Tapo closed socket before HTTP headers")
         response += chunk
+        if len(response) > 8192:
+            raise OSError("HTTP headers too large")
 
     header_end = response.find(b"\r\n\r\n")
-    if header_end == -1:
-        return 0, {}, b""
-
     headers_raw = response[:header_end]
     body = response[header_end + 4:]
 
-    cl = 0
-    for line in headers_raw.split(b"\r\n"):
-        if line.lower().startswith(b"content-length"):
-            cl = int(line.split(b": ")[1])
-            break
+    # KLAP normally uses Content-Length.  Keep a close-delimited fallback so
+    # an otherwise valid response is not discarded merely because the device
+    # omitted the header.
+    content_length = None
+    chunked = False
+    for line in headers_raw.split(b"\r\n")[1:]:
+        lower = line.lower()
+        if lower.startswith(b"content-length:"):
+            try:
+                content_length = int(line.split(b":", 1)[1].strip())
+            except (ValueError, IndexError):
+                raise OSError("Invalid Content-Length")
+        elif lower.startswith(b"transfer-encoding:") and b"chunked" in lower:
+            chunked = True
 
-    while len(body) < cl:
-        chunk = s.recv(1024)
-        if not chunk:
-            break
-        body += chunk
+    if chunked:
+        # Tapo KLAP is not expected to use chunked encoding.  Do not attempt
+        # to guess at framing because doing so could corrupt the next packet.
+        raise OSError("Chunked HTTP response is unsupported")
 
-    return parse_http_response(headers_raw + b"\r\n\r\n" + body[:cl])
+    if content_length is not None:
+        while len(body) < content_length:
+            chunk = s.recv(1024)
+            if not chunk:
+                raise OSError("Tapo closed socket during HTTP body")
+            body += chunk
+        body = body[:content_length]
+    else:
+        # Requests below use Connection: close.  If there is no length, read
+        # until the peer closes the socket.
+        while True:
+            chunk = s.recv(1024)
+            if not chunk:
+                break
+            body += chunk
+
+    return parse_http_response(headers_raw + b"\r\n\r\n" + body)
 
 
-def send_on_socket(s, host, path, body=b"", headers=None):
-    """Send POST on existing socket, return (status, headers, body)."""
+def http_post(tapo_ip, path, body=b"", headers=None):
+    """POST one HTTP request using a fresh TCP connection."""
     if headers is None:
         headers = {}
 
-    req = "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\n".format(
-        path, host, len(body)
-    )
-    for k, v in headers.items():
-        req += "{}: {}\r\n".format(k, v)
-    req += "\r\n"
-
-    s.send(req.encode() + body)
-    return read_response(s)
-
-
-# --- KLAP v2 session ---
-
-def klap_session(tapo_ip):
-    """
-    Establish a KLAP v2 session with the Tapo device.
-    Returns (socket, cookie, key, iv, sig_key, seq) or None on failure.
-    """
-    local_seed = os.urandom(16)
-
-    s = socket.socket()
-    s.settimeout(10)
-
+    s = None
     try:
+        s = socket.socket()
+        s.settimeout(KLAP_HTTP_TIMEOUT_SEC)
         s.connect((tapo_ip, 80))
 
-        # Handshake 1
-        status, headers, body = send_on_socket(s, tapo_ip, "/app/handshake1", body=local_seed)
+        req = "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\n".format(
+            path, tapo_ip, len(body)
+        )
+        req += "Connection: close\r\n"
+        for k, v in headers.items():
+            req += "{}: {}\r\n".format(k, v)
+        req += "\r\n"
+
+        s.send(req.encode() + body)
+        return read_response(s)
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+
+def _ticks_seconds():
+    """Monotonic-ish seconds suitable for session expiry on MicroPython."""
+    return time.ticks_ms() // 1000
+
+
+def _session_expired(session):
+    if session is None:
+        return True
+    return time.ticks_diff(session["expires_at"], time.ticks_ms()) <= 0
+
+
+def _extract_cookie(headers, name):
+    """Extract a named cookie from Set-Cookie without comma-splitting values."""
+    raw = headers.get(b"set-cookie", b"")
+    if not raw:
+        return None
+
+    # Multiple Set-Cookie values can be combined by our parser.  Searching for
+    # the cookie name at a cookie boundary is safer than splitting on commas.
+    marker = (name + "=").encode()
+    start = raw.find(marker)
+    while start >= 0:
+        if start == 0 or raw[start - 1:start] in (b" ", b",", b";"):
+            end = raw.find(b";", start)
+            if end < 0:
+                end = len(raw)
+            value = raw[start:end].strip()
+            if value:
+                return value.decode()
+        start = raw.find(marker, start + len(marker))
+    return None
+
+
+def _cookie_int(headers, name, default):
+    value = _extract_cookie(headers, name)
+    if value is None:
+        return default
+    try:
+        return int(value.split("=", 1)[1])
+    except (ValueError, IndexError):
+        return default
+
+
+def klap_reset_session(reason=None):
+    """Invalidate KLAP state so the next request performs a fresh handshake."""
+    global _KLAP_SESSION
+    if reason:
+        log("  KLAP session reset: {}".format(reason))
+    _KLAP_SESSION = None
+
+
+def klap_session(tapo_ip):
+    """Establish and cache a KLAP v2 encryption session."""
+    local_seed = os.urandom(16)
+
+    try:
+        # Handshake 1 is a standalone HTTP transaction.  The response also
+        # supplies the TP_SESSIONID cookie used by handshake 2 and requests.
+        status, headers, body = http_post(
+            tapo_ip, "/app/handshake1", body=local_seed
+        )
         if status != 200:
-            s.close()
+            log("  KLAP handshake1 HTTP {}".format(status))
             return None
 
-        # Extract TP_SESSIONID cookie
-        cookie = ""
-        cookie_header = headers.get(b"set-cookie", b"")
-        if cookie_header:
-            for part in cookie_header.decode().split(","):
-                part = part.strip()
-                if "TP_SESSIONID" in part:
-                    cookie = part.split(";")[0]
-                    break
+        if len(body) < 48:
+            log("  KLAP handshake1 response too short ({})".format(len(body)))
+            return None
 
-        if not cookie or len(body) < 48:
-            s.close()
+        cookie = _extract_cookie(headers, "TP_SESSIONID")
+        if not cookie:
+            log("  KLAP handshake1 missing TP_SESSIONID")
             return None
 
         remote_seed = body[:16]
         server_hash = body[16:48]
 
-        # Verify server hash
-        if server_hash != sha256(local_seed + remote_seed + AUTH_HASH):
-            s.close()
+        expected_hash = sha256(local_seed + remote_seed + AUTH_HASH)
+        if server_hash != expected_hash:
+            log("  KLAP handshake1 server hash mismatch")
             return None
 
-        # Handshake 2
+        # Kasa reads the TIMEOUT cookie and expires the local session early.
+        timeout_sec = _cookie_int(headers, "TIMEOUT", KLAP_DEFAULT_SESSION_SEC)
+        if timeout_sec <= KLAP_SESSION_EXPIRY_BUFFER_SEC:
+            expiry_sec = max(60, timeout_sec)
+        else:
+            expiry_sec = timeout_sec - KLAP_SESSION_EXPIRY_BUFFER_SEC
+
+        # Handshake 2 is another independent HTTP transaction.  Do not depend
+        # on the handshake1 TCP socket remaining open.
         hs2_payload = sha256(remote_seed + local_seed + AUTH_HASH)
-        status, headers, body = send_on_socket(
-            s, tapo_ip, "/app/handshake2",
+        status, _, _ = http_post(
+            tapo_ip,
+            "/app/handshake2",
             body=hs2_payload,
             headers={"Cookie": cookie},
         )
         if status != 200:
-            s.close()
+            log("  KLAP handshake2 HTTP {}".format(status))
             return None
 
-        # Derive keys
         key = sha256(b"lsk" + local_seed + remote_seed + AUTH_HASH)[:16]
         full_iv = sha256(b"iv" + local_seed + remote_seed + AUTH_HASH)
         iv = full_iv[:12]
         seq = int.from_bytes(full_iv[-4:], "big", True)
         sig_key = sha256(b"ldk" + local_seed + remote_seed + AUTH_HASH)[:28]
 
-        return s, cookie, key, iv, sig_key, seq
+        global _KLAP_SESSION
+        _KLAP_SESSION = {
+            "cookie": cookie,
+            "key": key,
+            "iv": iv,
+            "sig_key": sig_key,
+            "seq": seq,
+            "expires_at": time.ticks_add(time.ticks_ms(), expiry_sec * 1000),
+        }
+        return _KLAP_SESSION
 
-    except OSError:
-        try:
-            s.close()
-        except OSError:
-            pass
+    except OSError as e:
+        log("  KLAP handshake transport error: {}".format(e))
+        klap_reset_session()
+        return None
+    except Exception as e:
+        # Keep unexpected protocol/parser failures from killing the watchdog.
+        log("  KLAP handshake error: {}".format(e))
+        klap_reset_session()
         return None
 
 
-def klap_request(s, tapo_ip, cookie, key, iv, sig_key, seq, payload_dict):
-    """Encrypt and send a KLAP command. Returns (seq, status, decrypted_response)."""
-    seq += 1
+def klap_get_session(tapo_ip):
+    """Return a valid cached session, or create one."""
+    if _session_expired(_KLAP_SESSION):
+        if _KLAP_SESSION is not None:
+            log("  KLAP session expired; performing fresh handshake")
+        klap_reset_session()
+        return klap_session(tapo_ip)
+    return _KLAP_SESSION
+
+
+def klap_request(tapo_ip, payload_dict):
+    """Send one KLAP command using cached session state.
+
+    Returns (status, decrypted_response).  A transport/protocol failure raises
+    OSError so callers can invalidate the session and retry from scratch.
+    """
+    global _KLAP_SESSION
+
+    session = klap_get_session(tapo_ip)
+    if session is None:
+        raise OSError("KLAP session unavailable")
+
+    seq = session["seq"] + 1
     cmd = json.dumps(payload_dict).encode()
 
     pad_len = 16 - (len(cmd) % 16)
     padded = cmd + bytes([pad_len] * pad_len)
-
     seq_bytes = struct.pack(">l", seq)
-    cipher = cryptolib.aes(key, 2, iv + seq_bytes)
-    ciphertext = cipher.encrypt(padded)
 
-    signature = sha256(sig_key + seq_bytes + ciphertext)
+    cipher = cryptolib.aes(session["key"], 2, session["iv"] + seq_bytes)
+    ciphertext = cipher.encrypt(padded)
+    signature = sha256(session["sig_key"] + seq_bytes + ciphertext)
     request_body = signature + ciphertext
 
-    status, headers, body = send_on_socket(
-        s, tapo_ip, "/app/request?seq={}".format(seq),
+    status, _, body = http_post(
+        tapo_ip,
+        "/app/request?seq={}".format(seq),
         body=request_body,
-        headers={"Cookie": cookie},
+        headers={"Cookie": session["cookie"]},
     )
 
-    # Decrypt response if present
-    response = None
-    if status == 200 and len(body) > 32:
-        resp_ciphertext = body[32:]
-        decipher = cryptolib.aes(key, 2, iv + seq_bytes)
-        decrypted = decipher.decrypt(resp_ciphertext)
-        pad = decrypted[-1]
-        response = json.loads(decrypted[:-pad])
+    # The sequence belongs to the current encryption session even when the
+    # device returns an application/security error.
+    session["seq"] = seq
 
-    return seq, status, response
+    if status == 403:
+        # python-kasa explicitly invalidates the KLAP handshake after 403 so
+        # the next operation gets a new TP_SESSIONID and sequence state.
+        klap_reset_session("device returned HTTP 403")
+        return status, None
+
+    if status != 200:
+        return status, None
+
+    if len(body) <= 32:
+        raise OSError("KLAP response too short ({})".format(len(body)))
+
+    try:
+        resp_ciphertext = body[32:]
+        decipher = cryptolib.aes(
+            session["key"], 2, session["iv"] + seq_bytes
+        )
+        decrypted = decipher.decrypt(resp_ciphertext)
+        if not decrypted:
+            raise ValueError("empty decrypted response")
+        pad = decrypted[-1]
+        if pad < 1 or pad > 16 or pad > len(decrypted):
+            raise ValueError("invalid PKCS#7 padding")
+        response = json.loads(decrypted[:-pad])
+    except Exception as e:
+        raise OSError("KLAP response decrypt/JSON failed: {}".format(e))
+
+    return status, response
 
 
 # --- Tapo control ---
 
 def check_tapo_state(tapo_ip):
-    """Check if Tapo is ON. Returns True/False/None (on error). Retries once."""
-    for _ in range(2):
-        session = klap_session(tapo_ip)
-        if not session:
-            time.sleep(3)
-            continue
-
-        s, cookie, key, iv, sig_key, seq = session
+    """Check if Tapo is ON. Returns True/False/None on failure."""
+    # Keep the existing two-attempt behavior, but make each retry a genuinely
+    # fresh KLAP session after any transport/protocol failure.
+    for attempt in range(2):
         try:
-            seq, status, response = klap_request(
-                s, tapo_ip, cookie, key, iv, sig_key, seq,
-                {"method": "get_device_info"}
+            status, response = klap_request(
+                tapo_ip, {"method": "get_device_info"}
             )
             if status == 200 and response:
                 return response.get("result", {}).get("device_on", False)
+
+            if status == 403:
+                log("  KLAP get_device_info rejected (HTTP 403); retrying handshake")
+            else:
+                log("  KLAP get_device_info failed: HTTP {}".format(status))
         except OSError as e:
-            log("  KLAP get_device_info OSError: {}".format(e))
-        finally:
-            try:
-                s.close()
-            except OSError:
-                pass
-        time.sleep(3)
+            log("  KLAP get_device_info transport error: {}".format(e))
+
+        klap_reset_session("get_device_info failed")
+        if attempt == 0:
+            time.sleep(KLAP_RETRY_DELAY_SEC)
 
     return None
 
 
+def tapo_query(tapo_ip, payload):
+    """Send a KLAP command and return its decrypted response, or None on failure."""
+    try:
+        status, response = klap_request(tapo_ip, payload)
+        if status == 200:
+            return response
+        log("  Tapo query failed: HTTP {}".format(status))
+    except OSError as e:
+        log("  Tapo query transport error: {}".format(e))
+
+    klap_reset_session("tapo_query failed")
+    return None
+
+
+def tapo_draw_mw(tapo_ip):
+    """Return P110 current power draw in mW, or None if unavailable."""
+    response = tapo_query(tapo_ip, {"method": "get_energy_usage"})
+    try:
+        return response["result"]["current_power"]
+    except (TypeError, KeyError):
+        log("  Tapo energy response missing current_power: {}".format(response))
+        return None
+
+
+def turn_off_tapo(tapo_ip):
+    """Turn off the Tapo plug. Returns True only when the command succeeds."""
+    response = tapo_query(
+        tapo_ip,
+        {"method": "set_device_info", "params": {"device_on": False}},
+    )
+    if response is not None:
+        log("  Tapo turned OFF for recovery cycle")
+        return True
+    log("  Failed to turn Tapo OFF for recovery cycle")
+    return False
+
+
 def turn_on_tapo(tapo_ip):
     """Turn on the Tapo plug. Returns True on success."""
-    session = klap_session(tapo_ip)
-    if not session:
-        log("  KLAP session failed")
-        return False
-
-    s, cookie, key, iv, sig_key, seq = session
+    # Keep the original one-attempt contract.  The existing main loop already
+    # performs three attempts with its 5-second delay.  A failed request here
+    # invalidates the KLAP session so the next outer-loop attempt handshakes
+    # from scratch, just like python-kasa does after a retryable failure.
     try:
-        seq, status, response = klap_request(
-            s, tapo_ip, cookie, key, iv, sig_key, seq,
-            {"method": "set_device_info", "params": {"device_on": True}}
+        status, response = klap_request(
+            tapo_ip,
+            {"method": "set_device_info", "params": {"device_on": True}},
         )
         if status == 200:
             log("  Tapo turned ON!")
             return True
-        log("  Turn ON failed: HTTP {}".format(status))
-        return False
+
+        if status == 403:
+            log("  Turn ON rejected (HTTP 403); resetting KLAP session")
+        else:
+            log("  Turn ON failed: HTTP {}".format(status))
     except OSError as e:
-        log("  Turn ON OSError: {}".format(e))
+        log("  Turn ON transport error: {}".format(e))
+
+    klap_reset_session("turn_on_tapo failed")
+    return False
+
+
+def power_cycle_tapo(tapo_ip):
+    """Power-cycle Tapo, leaving it ON if the recovery succeeds."""
+    if not turn_off_tapo(tapo_ip):
         return False
-    finally:
-        try:
-            s.close()
-        except OSError:
-            pass
+
+    # The old KLAP session is no longer needed after changing power state.
+    # Force a fresh handshake when we turn the plug back on.
+    klap_reset_session("power-cycle: Tapo turned OFF")
+    cooperative_sleep(CYCLE_OFF_SEC)
+
+    for attempt in range(3):
+        log("  Recovery power-on attempt {}/3...".format(attempt + 1))
+        if turn_on_tapo(tapo_ip):
+            return True
+        if attempt < 2:
+            cooperative_sleep(5)
+
+    log("  Recovery power-cycle could not turn Tapo back ON")
+    return False
 
 
 # --- HA webhooks (fire-and-forget) ---
@@ -496,6 +713,7 @@ def main():
     last_heartbeat = 0
     stuck_since = 0  # timestamp when "Tapo on but Mini PC down" first observed
     stuck_alerted = False
+    recovery_cycles = 0  # power-cycles performed during the current down episode
 
     # Send initial heartbeat
     send_heartbeat()
@@ -524,6 +742,7 @@ def main():
             consecutive_failures = 0
             stuck_since = 0
             stuck_alerted = False
+            recovery_cycles = 0
             cooperative_sleep(NORMAL_SLEEP_SEC)
             continue
 
@@ -540,19 +759,56 @@ def main():
         tapo_on = check_tapo_state(TAPO_IP)
 
         if tapo_on is True:
-            # Smart detection: Tapo is ON, so Mini PC is rebooting / hung,
-            # not powered off. Don't turn anything on.
+            # Tapo is ON while the Mini PC is unreachable. Initially this may
+            # simply be a reboot/boot sequence. After STUCK_RECOVER_SEC, use
+            # the P110 live wattage to distinguish a low-power halted PC from
+            # a normally booting/running machine. Only the low-power case is
+            # allowed to trigger a hard power-cycle.
             now = time.time()
             if stuck_since == 0:
                 stuck_since = now
                 log("Tapo is ON but Mini PC down — assume rebooting; tracking.")
-            elif (now - stuck_since) >= STUCK_ALERT_THRESHOLD_SEC and not stuck_alerted:
+
+            stuck_for = now - stuck_since
+
+            if (stuck_for >= STUCK_ALERT_THRESHOLD_SEC and not stuck_alerted):
                 log("Mini PC stuck for {}s while Tapo ON → alerting HA".format(
-                    int(now - stuck_since)))
+                    int(stuck_for)))
                 fire_webhook(HA_MINI_PC_STUCK_URL, {
-                    "stuck_for_sec": int(now - stuck_since),
+                    "stuck_for_sec": int(stuck_for),
                 })
                 stuck_alerted = True
+
+            if (stuck_for >= STUCK_RECOVER_SEC and
+                    recovery_cycles < MAX_RECOVERY_CYCLES):
+                mw = tapo_draw_mw(TAPO_IP)
+                log("Tapo draw: {} mW (halt threshold: {} mW)".format(
+                    mw, HALTED_MAX_MW))
+
+                if mw is not None and mw < HALTED_MAX_MW:
+                    recovery_cycles += 1
+                    log("PC looks halted ({} mW) → power-cycling Tapo "
+                        "(cycle {}/{})".format(
+                            mw, recovery_cycles, MAX_RECOVERY_CYCLES))
+                    if not power_cycle_tapo(TAPO_IP):
+                        log("Recovery power-cycle failed; will retry on next cycle")
+                    else:
+                        log("Recovery power-cycle complete; waiting for Mini PC boot")
+                    # Give the PSU/BIOS a full boot window before measuring again.
+                    consecutive_failures = 0
+                    stuck_since = 0
+                    stuck_alerted = False
+                    cooperative_sleep(NORMAL_SLEEP_SEC)
+                    continue
+                elif mw is None:
+                    log("Could not read Tapo power draw; no recovery cycle performed")
+                else:
+                    log("PC draw is above halted threshold; no power-cycle")
+
+            if recovery_cycles >= MAX_RECOVERY_CYCLES:
+                log("Maximum recovery cycles reached for this down episode; "
+                    "leaving Tapo ON")
+
             consecutive_failures = 0
             cooperative_sleep(NORMAL_SLEEP_SEC)
             continue
@@ -599,3 +855,4 @@ def main():
 
 
 main()
+
