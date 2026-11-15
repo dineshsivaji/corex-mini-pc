@@ -363,6 +363,14 @@ def run_cmd(cmd: list[str], description: str) -> bool:
         log.error(f"{description}: exception {e}")
         return False
 
+async def wait_for_delivery(js, stream="NOTIFY", consumer="whatsapp-bridge", timeout=25):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        info = await js.consumer_info(stream, consumer)
+        if info.num_pending == 0 and info.num_ack_pending == 0:
+            return True
+        await asyncio.sleep(1)
+    return False
 
 async def execute_shutdown_sequence(js, config: Config) -> None:
     """Pre-shutdown sequence + final shutdown command. Does not return."""
@@ -382,7 +390,7 @@ async def execute_shutdown_sequence(js, config: Config) -> None:
     # 1. Publish "power cut" to NATS — blocks until JetStream acks.
     # Durable: even if the WhatsApp socket is down right now, the
     # message survives the reboot and gets delivered when it returns.
-    log.info("Step 1/6: NATS publish power_cut")
+    log.info("Step 1/7: NATS publish power_cut")
     await publish(
         js,
         config,
@@ -390,25 +398,32 @@ async def execute_shutdown_sequence(js, config: Config) -> None:
         "power_cut",
         str(event_ts),
     )
+    log.info(f"Waiting for the whatsapp msg delivery")
+    delivered = await wait_for_delivery(js)
+    log.info(f"alert delivered={delivered}")
+    # 2. Stop the whatsapp first (graceful handling is added on the service)
+    log.info(f"Step 2/7: Stop the whatsapp first (graceful handling is added on the service)")
+    run_cmd(["sudo", "docker", "stop", "-t", "20", "whatsapp-server-api"], "stop whatsapp") 
 
-    # 2. Sync filesystem
-    log.info("Step 2/6: sync")
-    run_cmd(["sync"], "sync")
-
+    
     # 3. Set Tapo countdown (with retry; tapo_failed alert via NATS inside)
-    log.info(f"Step 3/6: Tapo countdown {config.tapo_countdown_sec}s")
+    log.info(f"Step 3/7: Tapo countdown {config.tapo_countdown_sec}s")
     await set_tapo_countdown_with_retry(js, config, event_ts)
 
     # 4. Stop Docker (graceful container shutdown)
-    log.info("Step 4/6: systemctl stop docker")
+    log.info("Step 4/7: systemctl stop docker")
     run_cmd(["sudo", "systemctl", "stop", "docker"], "stop docker")
 
+    # 2. Sync filesystem
+    log.info("Step 5/7: sync")
+    run_cmd(["sync"], "sync")
+
     # 5. Unmount HDD (best-effort)
-    log.info(f"Step 5/6: umount {config.storage_mount}")
+    log.info(f"Step 6/7: umount {config.storage_mount}")
     run_cmd(["sudo", "umount", config.storage_mount], "umount")
 
     # 6. Final shutdown
-    log.critical("Step 6/6: shutdown -P now — system going down")
+    log.critical("Step 7/7: shutdown -P now — system going down")
     # Flush log handlers so the above line reaches journald before the OS halts
     for handler in log.handlers:
         handler.flush()
