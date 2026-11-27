@@ -1,0 +1,28 @@
+# Script id: ask_chatgpt_and_speak  (lives in scripts.yaml under that key)
+# Asks chatgpt_api.py (via rest_command.ask_chatgpt) and speaks the answer on the Nest Mini.
+alias: Ask ChatGPT and speak on Nest Mini
+mode: queued
+fields:
+  question:
+    description: The question to ask
+sequence:
+  - action: rest_command.ask_chatgpt
+    data:
+      question: "{{ question }}"
+    response_variable: result
+    continue_on_error: true
+  - variables:
+      answer: >-
+        {% if result is defined and result.status == 200 %}
+          {{ result.content.answer }}
+        {% else %}
+          Sorry, I could not get an answer right now.
+        {% endif %}
+  - action: tts.speak
+    target:
+      entity_id: tts.piper
+    data:
+      media_player_entity_id: media_player.master_bedroom_speaker
+      message: "{{ answer }}"
+      language: en_US        # required: without it Piper picked a non-English voice (silent on the Nest)
+      cache: false

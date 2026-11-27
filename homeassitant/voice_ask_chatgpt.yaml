@@ -1,0 +1,19 @@
+# Automation (lives in automations.yaml): "ask <question>" in HA Assist → ChatGPT → Nest Mini.
+# The slow part runs in the background script so Assist doesn't time out.
+id: voice_ask_chatgpt
+alias: Voice - ask ChatGPT
+description: "Say 'ask <question>' to Assist; the answer plays on the Nest Mini."
+triggers:
+  - trigger: conversation
+    command:
+      - "ask {question}"
+      - "ask chatgpt {question}"
+      - "question {question}"
+actions:
+  - action: script.turn_on
+    target:
+      entity_id: script.ask_chatgpt_and_speak
+    data:
+      variables:
+        question: "{{ trigger.slots.question }}"
+  - set_conversation_response: "Let me find out."

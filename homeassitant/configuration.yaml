@@ -47,3 +47,19 @@ counter:
     initial: 0
     step: 1
     restore: true
+
+# --- Voice assistant: ask ChatGPT via chatgpt_api.py (added 2026-11-27) ---
+rest_command:
+  ask_chatgpt:
+    url: "http://127.0.0.1:8090/ask"
+    method: POST
+    content_type: "application/json"
+    payload: '{{ {"question": question} | to_json }}'
+    timeout: 120
+
+# --- Allow Caddy (LAN-only HTTPS at https://ha.home.dineshsivaji.dev) to proxy HA ---
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 127.0.0.1
+    - ::1
