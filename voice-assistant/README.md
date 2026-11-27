@@ -62,6 +62,12 @@ Runtime state lives in `./data/` (git-ignored):
 - **Login modal:** closed automatically; if it sticks, the page is reloaded and the question retried.
 - **Repeat:** saying "say that again" / "repeat" / "what did you say" replays the last answer without
   asking ChatGPT.
+- **Persona "Ollie the Owl":** every question is prefixed with a kid-friendly character prompt
+  (ages 5-7: excited, simple words, comparisons to everyday things, one fun fact, a small question
+  back, under 50 words). Override with `PREFIX=` in `.env` (empty = send questions as-is).
+- **Speech clean-up:** answers are passed through `clean_for_speech()` before they are returned or
+  spoken - emojis/symbols and markdown are stripped, `°C`, `&`, `~`, `%` are spelled out.
+  The original text is kept as `answer_raw` in `/ask` responses.
 - One question at a time (queued); one retry with a fresh browser on failure.
 
 ## Troubleshooting

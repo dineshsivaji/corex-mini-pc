@@ -37,6 +37,7 @@ import os
 import re
 import tempfile
 import time
+import unicodedata
 import urllib.request
 
 import uvicorn
@@ -66,11 +67,54 @@ TTS_LANG = os.environ.get("TTS_LANG", "en_US")
 TTS_VOICE = os.environ.get("TTS_VOICE", "")
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
+# Persona added before every question (the chat resets after idle, so it's re-sent each time).
 PREFIX = os.environ.get(
     "PREFIX",
-    "Answer in 2-3 short, simple sentences for a 5-year-old, under 45 words, "
-    "no lists or markdown. Question: ",
+    "You are Ollie, a cheerful owl who explains things to kids aged 5 to 7. "
+    "Be excited, warm and a little silly, and vary how you start. "
+    "Use simple words, compare to things kids know, share one amazing fact, "
+    "and end with a tiny question back. Under 50 words, 2-3 short sentences, "
+    "no emojis, lists or markdown. For scary or grown-up topics, suggest asking a grown-up. "
+    "Question: ",
 )
+
+# ---------- make answers safe for text-to-speech ----------
+_SPEECH_REPLACEMENTS = [
+    (re.compile(r"\s*°\s*C\b"), " degrees Celsius"),
+    (re.compile(r"\s*°\s*F\b"), " degrees Fahrenheit"),
+    (re.compile(r"\s*°"), " degrees"),
+    (re.compile(r"\s*&\s*"), " and "),
+    (re.compile(r"~\s*(?=\d)"), "about "),
+    (re.compile(r"(?<=\d)\s*%"), " percent"),
+    (re.compile(r"\be\.g\.", re.IGNORECASE), "for example"),
+]
+_MARKDOWN = [
+    (re.compile(r"\[([^\]]+)\]\([^)]*\)"), r"\1"),           # [text](url) → text
+    (re.compile(r"(\*\*|__|\*|`)"), ""),                      # bold / italics / code marks
+    (re.compile(r"(?m)^\s*(#{1,6}\s+|[-•*]\s+|\d+[.)]\s+)"), ""),  # headings, bullets, numbered lists
+]
+
+
+def clean_for_speech(text: str) -> str:
+    """Strip emojis, symbols and markdown so Piper reads the answer naturally."""
+    for pattern, repl in _SPEECH_REPLACEMENTS + _MARKDOWN:
+        text = pattern.sub(repl, text)
+    kept = []
+    for ch in text:
+        cp = ord(ch)
+        if ch in "‍︎️" or 0x1F3FB <= cp <= 0x1F3FF:  # ZWJ, variation selectors, skin tones
+            continue
+        if unicodedata.category(ch) in ("So", "Sk", "Cs", "Co"):    # emojis & other symbols
+            continue
+        kept.append(ch)
+    text = "".join(kept)
+    # Former list items / lines: end each with punctuation so they don't run together when spoken.
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    text = " ".join(ln if ln[-1] in ".!?,;:" else ln + "." for ln in lines)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+([,.!?;:])", r"\1", text)                 # no space before punctuation
+    text = re.sub(r"([!?.]){3,}", r"\1", text)                   # "!!!" → "!"
+    return text.strip()
 
 SELECTORS = {
     "input": 'textarea[name="prompt"]:visible, textarea[aria-label="Chat with ChatGPT"]:visible, '
@@ -279,8 +323,9 @@ class ChatGPTBrowser:
                 answer = await self._ask_once(question)
             self.queries += 1
             self.last_activity = time.time()
-            self.last = {"question": question, "answer": answer, "at": time.time()}
-            return answer
+            spoken = clean_for_speech(answer) or answer
+            self.last = {"question": question, "answer": spoken, "answer_raw": answer, "at": time.time()}
+            return spoken
 
 
 browser = ChatGPTBrowser()
@@ -319,7 +364,8 @@ async def _answer(question: str) -> dict:
         answer = await browser.ask(question)
     except Exception as e:
         raise HTTPException(502, f"browser error: {e}") from e
-    return {"question": question, "answer": answer, "seconds": round(time.time() - t0, 1)}
+    raw = (browser.last or {}).get("answer_raw", answer)
+    return {"question": question, "answer": answer, "answer_raw": raw, "seconds": round(time.time() - t0, 1)}
 
 
 @app.post("/ask")
@@ -515,6 +561,7 @@ async def voice_speak(req: SpeakRequest | None = None) -> dict:
     text = (req.text if req and req.text else None) or (browser.last or {}).get("answer")
     if not text:
         raise HTTPException(404, "nothing to repeat yet")
+    text = clean_for_speech(text) or text
     try:
         await ha_speak(text)
     except Exception as e:
