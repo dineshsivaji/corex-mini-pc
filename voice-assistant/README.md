@@ -14,6 +14,7 @@ Home Assistant tts.speak → Piper (wyoming-piper :10200) → MP3 → Nest Mini 
 |---|---|
 | `chatgpt_api.py` | FastAPI service: keeps one chatgpt.com session in Chromium, voice page, STT + speak |
 | `Dockerfile`, `docker-entrypoint.sh`, `docker-compose.yml`, `requirements.txt` | Container for `chatgpt_api` (auto-starts on boot) |
+| `persona.txt`, `persona-ollie.txt` | Persona sent once per chat / backup version |
 | `.env.example` | Settings template — copy to `.env` (git-ignored) |
 | `voice-stack/docker-compose.yml` | Whisper (STT) + Piper (TTS) containers for HA's Wyoming integration |
 | `run_chatgpt_api.sh` | Run without Docker (venv + host Xvfb on `:99`) — for development |
@@ -62,9 +63,13 @@ Runtime state lives in `./data/` (git-ignored):
 - **Login modal:** closed automatically; if it sticks, the page is reloaded and the question retried.
 - **Repeat:** saying "say that again" / "repeat" / "what did you say" replays the last answer without
   asking ChatGPT.
-- **Persona "Ollie the Owl":** every question is prefixed with a kid-friendly character prompt
-  (ages 5-7: excited, simple words, comparisons to everyday things, one fun fact, a small question
-  back, under 50 words). Override with `PREFIX=` in `.env` (empty = send questions as-is).
+- **Persona (sent once per chat):** `persona.txt` is sent as the first message of every new chat
+  (at container start, when reopening after idle, and after a retry). Questions are then sent exactly
+  as asked - no per-question prefix (`PREFIX` in `.env` can add one if ever needed). The file is
+  mounted into the container, so edit it and `POST /reload` (or wait for the next new chat) - no
+  rebuild. Keep its last paragraph: it tells ChatGPT that later messages are questions and to reply
+  "Ready!". `persona-ollie.txt` is the shorter "Ollie the Owl" version, kept as a backup
+  (`cp persona-ollie.txt persona.txt` to switch back).
 - **Speech clean-up:** answers are passed through `clean_for_speech()` before they are returned or
   spoken - emojis/symbols and markdown are stripped, `°C`, `&`, `~`, `%` are spelled out.
   The original text is kept as `answer_raw` in `/ask` responses.

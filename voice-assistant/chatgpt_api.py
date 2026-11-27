@@ -24,7 +24,8 @@ Voice page (phone):
 
 Env vars (optional):
     PORT=8090  HOST=0.0.0.0  IDLE_CLOSE_MIN=10 (close Chromium after N idle minutes)  HEADLESS=0
-    PREFIX="..."  (instruction added before each question; set PREFIX="" to disable)
+    PERSONA_FILE=persona.txt  (sent once at the start of every new chat)
+    PREFIX="..."  (optional text added before each question; default none)
     WHISPER_HOST=127.0.0.1  WHISPER_PORT=10300  STT_LANG=en
     HA_URL=http://127.0.0.1:8123  HA_TOKEN=<long-lived token>
     HA_SPEAKER=media_player.master_bedroom_speaker  HA_TTS=tts.piper  TTS_LANG=en_US  TTS_VOICE=
@@ -67,16 +68,14 @@ TTS_LANG = os.environ.get("TTS_LANG", "en_US")
 TTS_VOICE = os.environ.get("TTS_VOICE", "")
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
-# Persona added before every question (the chat resets after idle, so it's re-sent each time).
-PREFIX = os.environ.get(
-    "PREFIX",
-    "You are Ollie, a cheerful owl who explains things to kids aged 5 to 7. "
-    "Be excited, warm and a little silly, and vary how you start. "
-    "Use simple words, compare to things kids know, share one amazing fact, "
-    "and end with a tiny question back. Under 50 words, 2-3 short sentences, "
-    "no emojis, lists or markdown. For scary or grown-up topics, suggest asking a grown-up. "
-    "Question: ",
-)
+# Persona: sent ONCE as the first message of every new chat (browser start, idle reopen, retry).
+# Edit the file and the next new chat uses it - no rebuild needed (it's mounted in Docker).
+PERSONA_FILE = os.environ.get(
+    "PERSONA_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "persona.txt"))
+PRIME_TIMEOUT_S = 60
+
+# Optional text added before every question (default: none - questions are sent as-is).
+PREFIX = os.environ.get("PREFIX", "")
 
 # ---------- make answers safe for text-to-speech ----------
 _SPEECH_REPLACEMENTS = [
@@ -142,6 +141,7 @@ class ChatGPTBrowser:
         self.last_reload = time.time()
         self.queries = 0
         self.ready = False
+        self.primed = False            # persona sent in the current chat
         self.last: dict | None = None  # {"question", "answer", "at"} - for "repeat that"
         self._pw = self._ctx = self.page = None
 
@@ -169,6 +169,7 @@ class ChatGPTBrowser:
     def _mark_closed(self) -> None:
         self._ctx = self.page = None
         self.ready = False
+        self.primed = False
 
     async def _close(self) -> None:
         """Close Chromium. Caller must hold self.lock."""
@@ -219,6 +220,12 @@ class ChatGPTBrowser:
             except PWTimeout:
                 info = await self._save_debug("no-input")
                 print(f"[load] chat input not found (attempt {attempt}): {info}")
+                continue
+            try:
+                await self._prime()  # new chat → give it the persona once
+            except Exception as e:
+                info = await self._save_debug("prime-failed")
+                print(f"[persona] priming failed (attempt {attempt}): {e} - {info}")
                 continue
             self.ready = True
             self.last_reload = time.time()
@@ -291,14 +298,15 @@ class ChatGPTBrowser:
             return " ".join(last_text.split())
         raise TimeoutError("Reply did not finish")
 
-    async def _ask_once(self, question: str) -> str:
+    async def _send(self, text: str) -> str:
+        """Type a message into the chat, send it, and return the reply text."""
         await self._dismiss_popups()
         box = self._input()
         await box.wait_for(state="visible", timeout=30_000)
         before = await self.page.locator(SELECTORS["assistant"]).count()
 
         await box.click()
-        await box.fill(PREFIX + question)
+        await box.fill(text)
         send = self.page.locator(SELECTORS["send"]).first
         try:
             await send.wait_for(state="visible", timeout=3_000)
@@ -307,6 +315,35 @@ class ChatGPTBrowser:
             await box.press("Enter")
 
         return await self._wait_for_reply(before)
+
+    async def _ask_once(self, question: str) -> str:
+        return await self._send(PREFIX + question)
+
+    async def _prime(self) -> None:
+        """Send the persona as the first message of a new chat (once per chat)."""
+        self.primed = False
+        try:
+            with open(PERSONA_FILE) as f:
+                persona = f.read().strip()
+        except FileNotFoundError:
+            print(f"[persona] {PERSONA_FILE} not found - questions go without a persona")
+            return
+        if not persona:
+            return
+        t0 = time.time()
+        reply = await asyncio.wait_for(self._send(persona), PRIME_TIMEOUT_S)
+        self.primed = True
+        print(f"[persona] sent ({len(persona.split())} words) in {time.time() - t0:.1f}s, "
+              f"reply: {reply[:40]!r}")
+
+    async def warm_up(self) -> None:
+        """At startup: open the browser and prime the chat so the first question is fast."""
+        async with self.lock:
+            self.last_activity = time.time()  # idle timer starts now
+            try:
+                await self._ensure_open()
+            except Exception as e:
+                print(f"[startup] warm-up failed, will retry on first question: {e}")
 
     # ---------- public ----------
     async def ask(self, question: str) -> str:
@@ -342,9 +379,11 @@ async def idle_closer() -> None:
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
     await browser.start()
+    warm = asyncio.create_task(browser.warm_up())  # open + persona in the background
     task = asyncio.create_task(idle_closer())
     yield
     task.cancel()
+    warm.cancel()
     await browser.stop()
 
 
@@ -385,6 +424,7 @@ async def health() -> dict:
     return {
         "browser_open": browser.is_open,
         "ready": browser.ready,
+        "persona_sent": browser.primed,
         "busy": browser.lock.locked(),
         "queries": browser.queries,
         "idle_seconds": round(idle),
