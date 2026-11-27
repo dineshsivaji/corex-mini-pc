@@ -6,3 +6,14 @@
 # Caddy runtime state (certificates, ACME account key)
 caddy/data/
 caddy/config/
+
+# Voice assistant runtime state (browser profile/cookies, debug screenshots)
+voice-assistant/data/
+voice-assistant/debug/
+voice-assistant/.chatgpt-browser-profile/
+voice-assistant/voice-stack/whisper-data/
+voice-assistant/voice-stack/piper-data/
+
+# Python
+.venv/
+__pycache__/

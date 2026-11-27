@@ -1,0 +1,27 @@
+# Speech-to-text (Whisper) + text-to-speech (Piper) for Home Assistant's voice pipeline.
+# Run on the mini PC:   cd voice-stack && docker compose up -d
+# Then add both in HA:  Settings → Devices & services → Add integration → "Wyoming Protocol"
+#                       host = MINI-PC-IP, port = 10300 (whisper) and again with 10200 (piper)
+
+services:
+  whisper:
+    image: rhasspy/wyoming-whisper
+    container_name: wyoming-whisper
+    # base-int8 = good speed/accuracy on a Ryzen 4500U; try small-int8 if accuracy is poor
+    command: --model base-int8 --language en
+    ports:
+      - "10300:10300"
+    volumes:
+      - ./whisper-data:/data
+    restart: unless-stopped
+
+  piper:
+    image: rhasspy/wyoming-piper
+    container_name: wyoming-piper
+    # Other voices: https://rhasspy.github.io/piper-samples/  (e.g. en_US-lessac-medium, en_GB-alba-medium)
+    command: --voice en_US-amy-medium
+    ports:
+      - "10200:10200"
+    volumes:
+      - ./piper-data:/data
+    restart: unless-stopped

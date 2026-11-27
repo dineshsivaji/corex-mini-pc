@@ -1,0 +1,26 @@
+# chatgpt_api in Docker - starts automatically after a reboot (restart: unless-stopped).
+#   cp .env.example .env   # set HA_TOKEN (and optional overrides)
+#   docker compose up -d --build
+#   docker logs -f chatgpt-api
+services:
+  chatgpt-api:
+    build: .
+    image: chatgpt-api:local
+    container_name: chatgpt-api
+    network_mode: host            # reaches Whisper :10300 and HA :8123 on 127.0.0.1; serves :8090
+    restart: unless-stopped
+    init: true                    # reaps Chromium child processes
+    shm_size: "1gb"               # Chromium crashes with Docker's default 64 MB /dev/shm
+    user: "1000:1000"             # files in ./data stay owned by the host user
+    env_file: .env
+    environment:
+      PROFILE_DIR: /data/chatgpt-browser-profile   # cookies (keeps the bot check passed)
+      DEBUG_DIR: /data/debug                       # screenshots when the page fails to load
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
