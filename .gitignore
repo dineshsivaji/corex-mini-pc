@@ -1,0 +1,8 @@
+# Secrets - never commit
+.env
+*.env
+!.env.example
+
+# Caddy runtime state (certificates, ACME account key)
+caddy/data/
+caddy/config/

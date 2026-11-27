@@ -1,0 +1,28 @@
+# LAN-only HTTPS. Certificates come from Let's Encrypt via Cloudflare DNS (no inbound ports needed).
+# LOCAL_DOMAIN and CF_API_TOKEN come from .env  (e.g. LOCAL_DOMAIN=home.example.com)
+
+*.{$LOCAL_DOMAIN} {
+	tls {
+		dns cloudflare {$CF_API_TOKEN}
+		resolvers 1.1.1.1
+	}
+
+	# Home network only: drop anything not from a private address (192.168.x.x, 10.x, 127.0.0.1, ...)
+	@outside not remote_ip private_ranges
+	abort @outside
+
+	@voice host voice.{$LOCAL_DOMAIN}
+	handle @voice {
+		reverse_proxy 127.0.0.1:8090
+	}
+
+	@ha host ha.{$LOCAL_DOMAIN}
+	handle @ha {
+		reverse_proxy 127.0.0.1:8123
+	}
+
+	# Unknown sub-domain
+	handle {
+		abort
+	}
+}

@@ -1,0 +1,13 @@
+# Run on the mini PC:  cd caddy && cp .env.example .env  (fill it in)  && docker compose up -d --build
+services:
+  caddy:
+    build: .
+    image: caddy-cloudflare:local
+    container_name: caddy
+    network_mode: host          # reaches 127.0.0.1:8090 / :8123 directly; listens on :80 and :443
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data:/data            # certificates live here - keep it
+      - ./config:/config
