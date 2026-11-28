@@ -11,3 +11,4 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./data:/data            # certificates live here - keep it
       - ./config:/config
+      - ../voice-assistant/kokoro/web:/srv/tts-lab:ro   # Kokoro TTS test page

@@ -17,7 +17,7 @@ RUN pip install -r requirements.txt \
  && chmod -R a+rX /ms-playwright \
  && rm -rf /var/lib/apt/lists/*
 
-COPY chatgpt_api.py docker-entrypoint.sh persona.txt ./
+COPY chatgpt_api.py voice_kokoro.html docker-entrypoint.sh persona.txt ./
 RUN chmod +x docker-entrypoint.sh
 
 EXPOSE 8090

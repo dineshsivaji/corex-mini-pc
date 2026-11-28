@@ -1,0 +1,220 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes">
+<title>Curious Buddy</title>
+<style>
+ /* Kid mode for an e-ink screen: black on white, big text, no animation (redraws only on state change) */
+ body{font:28px/1.45 system-ui,sans-serif;max-width:900px;margin:12px auto;padding:0 16px;
+      text-align:center;background:#fff;color:#000}
+ h1{font-size:30px;margin:4px 0 8px;font-weight:700}
+ #status{font-size:46px;font-weight:800;margin:10px 0 14px;min-height:1.3em}
+ button{font:inherit;color:#000;background:#fff;border:4px solid #000;border-radius:20px;cursor:pointer;
+        user-select:none;-webkit-user-select:none;touch-action:manipulation}
+ button:disabled{border-style:dotted;color:#777}
+ #mic,#uploadBtn{display:block;width:100%;min-height:34vh;font-size:64px;font-weight:800;background:#000;color:#fff}
+ #mic.rec{background:#fff;color:#000;border:8px dashed #000}
+ #mic:disabled{background:#fff;color:#888;border:4px dotted #000}
+ #card{margin-top:18px;padding:16px 20px;border:4px solid #000;border-radius:18px;text-align:left}
+ #q{font-size:28px;font-weight:700;margin-bottom:8px}
+ #a{font-size:34px;line-height:1.5}
+ .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px}
+ .grid button{padding:20px 8px;font-size:32px;font-weight:800}
+ .row{display:flex;gap:14px;margin-top:14px}
+ .row button{flex:1;padding:16px 8px;font-size:28px;font-weight:700}
+ details{margin-top:28px;text-align:left;font-size:20px;border-top:3px solid #000;padding-top:10px}
+ summary{font-size:22px;font-weight:700;cursor:pointer}
+ details button{font-size:22px;padding:10px 16px;border-width:3px;border-radius:12px;margin:8px 8px 0 0}
+ .h{border-bottom:2px solid #000;padding:10px 0} .h b{display:block}
+ input[type=file]{display:none}
+ [hidden]{display:none!important}
+</style></head><body>
+<h1>🦉 Curious Buddy</h1>
+<div id="status">Tap and ask me!</div>
+<button id="mic">🎤 Tap and ask</button>
+<button id="uploadBtn" hidden onclick="document.getElementById('file').click()">🎤 Record a question</button>
+<input id="file" type="file" accept="audio/*" capture>
+
+<div id="card" hidden><div id="q"></div><div id="a"></div></div>
+
+<div id="quick" class="grid" hidden></div>
+<div id="replay" class="row" hidden>
+ <button id="again">🔁 Again</button>
+ <button id="slower">🐢 Slower</button>
+</div>
+
+<details id="grown">
+ <summary>Grown-ups</summary>
+ <button id="stop">⏹ Stop the speaker</button>
+ <a href="/voice">Old page (Piper voice)</a>
+ <p id="timing"></p>
+ <div id="history"></div>
+</details>
+
+<script>
+const $ = id => document.getElementById(id);
+if (new URLSearchParams(location.search).has('grownup')) $('grown').open = true;
+
+const NORMAL = [['more', '➕ Tell me more!'], ['why', '🤔 Why?'], ['easier', '🧸 Say it easier'], ['quiz', '❓ Quiz me!']];
+const ASKS_BACK = [['yes', '✅ Yes!'], ['tellme', '🙋 Tell me!'], ['guess', '🎤 I\'ll guess'], ['more', '➕ Tell me more!']];
+const WORDS = {idle: 'Tap and ask me!', thinking: 'Thinking…', speaking: 'Listen to the speaker!',
+               recording: 'I\'m listening…', sending: 'Thinking…'};
+
+let server = {state: 'idle'}, local = null, shown = '', pollTimer = null, haveAnswer = false, note = '';
+function setNote(t) { note = t; draw(); setTimeout(() => { note = ''; draw(); }, 5000); }
+
+// ---------- drawing (only when something changed: e-ink friendly) ----------
+function draw(msg) {
+  msg = msg || note;
+  const state = local || server.state;
+  const key = state + '|' + (msg || '') + '|' + haveAnswer;
+  if (key === shown) return;
+  shown = key;
+  $('status').textContent = msg || WORDS[state] || '';
+  const busy = state !== 'idle';
+  const mic = $('mic');
+  mic.classList.toggle('rec', state === 'recording');
+  mic.textContent = state === 'recording' ? '⏹ Done talking' : '🎤 Tap and ask';
+  mic.disabled = busy && state !== 'recording';
+  document.querySelectorAll('#quick button, #replay button').forEach(b => b.disabled = busy);
+  $('quick').hidden = $('replay').hidden = !haveAnswer;
+}
+
+function showAnswer(question, answer, asksBack) {
+  $('card').hidden = false;
+  $('q').textContent = '“' + question + '”';
+  $('a').textContent = answer;
+  const q = $('quick'); q.innerHTML = '';
+  (asksBack ? ASKS_BACK : NORMAL).forEach(([kind, label]) => {
+    const b = document.createElement('button'); b.textContent = label;
+    b.onclick = () => kind === 'guess' ? startRecording() : quick(kind, label);
+    q.appendChild(b);
+  });
+  haveAnswer = true; shown = '';
+}
+
+function addHistory(question, answer, seconds) {
+  const d = document.createElement('div'); d.className = 'h';
+  d.innerHTML = '<b></b><span></span><br>';
+  d.querySelector('b').textContent = question;
+  d.querySelector('span').textContent = answer;
+  const b = document.createElement('button'); b.textContent = '🔁 Play this again';
+  b.onclick = () => post('/voice-kokoro/speak', {text: answer});
+  d.appendChild(b);
+  $('history').prepend(d);
+  if (seconds) $('timing').textContent = 'Last: ' + Object.entries(seconds).map(([k, v]) => `${k} ${v}s`).join(' · ');
+}
+
+// ---------- server state (busy lock lives on the server) ----------
+async function poll() {
+  clearTimeout(pollTimer);
+  try {
+    const st = await (await fetch('/voice-kokoro/state')).json();
+    server = st;
+    if (!haveAnswer && st.answer) showAnswer(st.question, st.answer, st.asks_back);
+  } catch (e) {}
+  draw();
+  pollTimer = setTimeout(poll, (local || server.state !== 'idle') ? 1000 : 5000);
+}
+
+async function post(url, body, isForm) {
+  local = 'sending'; draw();
+  try {
+    const r = await fetch(url, isForm ? {method: 'POST', body}
+                                      : {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})});
+    const d = await r.json().catch(() => ({}));
+    local = null;
+    if (r.status === 409) { poll(); return null; }           // someone else is using it
+    if (r.status === 422) { setNote('Oops! I didn\'t hear you. Tap and try again!'); return null; }
+    if (!r.ok) { setNote('Oh no! Something went wrong. Try again!'); console.log(d); return null; }
+    return d;
+  } catch (e) { local = null; setNote('Oh no! Something went wrong. Try again!'); return null; }
+  finally { poll(); }
+}
+
+async function handleAnswer(d) {
+  if (!d || !d.answer) return;
+  showAnswer(d.heard, d.answer, d.asks_back);
+  addHistory(d.heard, d.answer, d.seconds);
+  if (d.speak_error) $('timing').textContent += ' · speaker: ' + d.speak_error;
+  poll();
+}
+
+async function quick(kind, label) { handleAnswer(await post('/voice-kokoro/quick', {kind})); }
+$('again').onclick = () => post('/voice-kokoro/speak', {});
+$('slower').onclick = () => post('/voice-kokoro/speak', {slow: true});
+$('stop').onclick = async () => { local = null; await fetch('/voice-kokoro/stop', {method: 'POST'}); poll(); };
+
+async function sendRecording(blob, name) {
+  const fd = new FormData(); fd.append('audio', blob, name);
+  handleAnswer(await post('/voice-kokoro/ask', fd, true));
+}
+
+// ---------- keep the screen on (where supported) ----------
+let wakeLock = null;
+async function keepAwake() { try { wakeLock = await navigator.wakeLock?.request('screen'); } catch (e) {} }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { keepAwake(); poll(); } });
+
+// ---------- recording: one tap; stops by itself after ~1.5 s of quiet ----------
+let rec = null, stream = null, actx = null, vadTimer = null, maxTimer = null, heardSpeech = false;
+
+async function startRecording() {
+  if (server.state !== 'idle' || local) return;
+  keepAwake();
+  fetch('/voice-kokoro/warm', {method: 'POST'}).catch(() => {});   // open ChatGPT while the child talks
+  try { stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true}}); }
+  catch (e) { useUpload(); setNote('Microphone is blocked. Ask a grown-up.'); return; }
+  const chunks = [];
+  rec = new MediaRecorder(stream);
+  rec.ondataavailable = ev => { if (ev.data.size) chunks.push(ev.data); };
+  rec.onstop = () => {
+    clearInterval(vadTimer); clearTimeout(maxTimer);
+    stream.getTracks().forEach(t => t.stop());
+    local = null;
+    if (!heardSpeech) {                         // only silence: don't send (Whisper invents words)
+      post('/voice-kokoro/speak', {text: "Oops, I didn't hear you. Tap and try again!"});
+      return;
+    }
+    const type = rec.mimeType || 'audio/webm';
+    sendRecording(new Blob(chunks, {type}), type.includes('mp4') ? 'question.m4a' : 'question.webm');
+  };
+  rec.start();
+  local = 'recording'; heardSpeech = false; draw();
+  watchSilence(stream);
+  maxTimer = setTimeout(() => rec.state === 'recording' && rec.stop(), 20000);   // safety stop
+}
+
+function watchSilence(stream) {
+  try {
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    actx.resume();
+    const an = actx.createAnalyser(); an.fftSize = 2048;
+    actx.createMediaStreamSource(stream).connect(an);
+    const buf = new Float32Array(an.fftSize);
+    const t0 = performance.now(); let noise = 0, n = 0, lastLoud = t0;
+    vadTimer = setInterval(() => {
+      an.getFloatTimeDomainData(buf);
+      let sum = 0; for (const v of buf) sum += v * v;
+      const rms = Math.sqrt(sum / buf.length), now = performance.now();
+      if (now - t0 < 400) { noise += rms; n++; return; }          // learn the room's background noise
+      const threshold = Math.max(0.01, (noise / Math.max(n, 1)) * 2.5);
+      if (rms > threshold) { heardSpeech = true; lastLoud = now; }
+      if (heardSpeech && now - lastLoud > 1500) rec.stop();        // finished talking
+      else if (!heardSpeech && now - t0 > 7000) rec.stop();        // never started talking
+    }, 100);
+  } catch (e) { heardSpeech = true; }   // no Web Audio: fall back to tap-to-stop / 20 s limit
+}
+
+$('mic').onclick = () => {
+  if (rec && rec.state === 'recording') { heardSpeech = true; rec.stop(); return; }   // second tap = send now
+  startRecording();
+};
+
+// Fallback when the browser has no live microphone: use the device's recorder app.
+function useUpload() { $('mic').hidden = true; $('uploadBtn').hidden = false; }
+$('file').addEventListener('change', e => {
+  const f = e.target.files[0]; if (f) sendRecording(f, f.name || 'question.m4a'); e.target.value = '';
+});
+if (!(window.isSecureContext && navigator.mediaDevices && window.MediaRecorder)) useUpload();
+
+poll();
+</script></body></html>

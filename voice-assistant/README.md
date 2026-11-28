@@ -19,6 +19,8 @@ Home Assistant tts.speak → Piper (wyoming-piper :10200) → MP3 → Nest Mini 
 | `voice-stack/docker-compose.yml` | Whisper (STT) + Piper (TTS) containers for HA's Wyoming integration |
 | `run_chatgpt_api.sh` | Run without Docker (venv + host Xvfb on `:99`) — for development |
 | `chatgpt_browser.py` | Standalone CLI version (one question at a time), for experimenting |
+| `voice_kokoro.html` | Kid-mode page for `/voice-kokoro` (Kokoro voice, e-ink friendly) |
+| `kokoro/` | Kokoro TTS container (`:8880`, CPU) + a speed-test page at `https://tts.home.dineshsivaji.dev` |
 
 HTTPS for the voice page comes from `../caddy` (`https://voice.home.dineshsivaji.dev`).
 HA script/automation/config snippets are in `../homeassitant` (`voice_ask_chatgpt*.yaml`).
@@ -49,6 +51,11 @@ Runtime state lives in `./data/` (git-ignored):
 | `GET/POST /ask` | `?q=…` or `{"question": …}` → `{"answer", "seconds"}` |
 | `POST /voice/ask` | multipart `audio` (+ `speak`) → `{"heard", "answer", "repeated", "spoken", "seconds"}` |
 | `POST /voice/speak` | `{"text": …}` speaks it; `{}` repeats the last answer |
+| `GET /voice-kokoro` | Trial kid-mode page, answers spoken with Kokoro (see below) |
+| `POST /voice-kokoro/ask` | multipart `audio` → Whisper → ChatGPT → Kokoro → Nest Mini; 409 while busy |
+| `POST /voice-kokoro/quick` | `{"kind": …}` quick-reply button: more, why, easier, quiz, yes, tellme |
+| `POST /voice-kokoro/speak` | `{}` replays the last answer, `{"text": …}`, `{"slow": true}` at 0.85× |
+| `GET /voice-kokoro/state`, `POST …/stop`, `POST …/warm` | busy state (idle/thinking/speaking), stop the speaker, open ChatGPT early |
 | `GET /last` | Last question/answer (from any client) |
 | `GET /health` | `browser_open`, `ready`, `busy`, `idle_seconds`, `closes_in_seconds` |
 | `GET /screenshot` | What the hidden browser shows (when open) |
@@ -84,3 +91,18 @@ ls data/debug/                                            # saved failures
 ```
 Selectors for chatgpt.com are in `SELECTORS` at the top of `chatgpt_api.py` — update them when the
 site changes.
+
+## Kokoro trial page (`/voice-kokoro`)
+
+`https://voice.home.dineshsivaji.dev/voice-kokoro` — the `/voice` page and HA (Piper) are unchanged.
+
+- **Voice:** Kokoro (`kokoro/docker-compose.yml`, must be running) makes an MP3; HA plays its URL on the
+  Nest Mini with `media_player.play_media` — no HA config needed. `.env`: `KOKORO_VOICE` (af_heart),
+  `KOKORO_SPEED` (1.0), `KOKORO_SLOW_SPEED` (0.85).
+- **One at a time:** server state idle → thinking → speaking → idle; other requests get 409 until the
+  Nest Mini stops playing (HA state, capped at clip length + 5 s). Grown-ups → Stop unlocks at once.
+- **Fast replays:** clips are cached by text + voice + speed (last 60), so Again starts in ~1 s.
+- **Kid mode:** one big button, recording stops itself after ~1.5 s of quiet, a short
+  "Hmm, let me think!" plays while ChatGPT works, spoken errors, quick-reply buttons
+  (Tell me more / Why? / Say it easier / Quiz me; Yes / Tell me / I'll guess when the answer asks back),
+  Again / Slower. Timings, Stop and history are under "Grown-ups" (or open with `?grownup=1`).

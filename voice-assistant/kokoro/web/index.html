@@ -1,0 +1,119 @@
+<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Kokoro TTS Lab</title>
+<style>
+ body{font:17px/1.5 system-ui,sans-serif;max-width:900px;margin:20px auto;padding:0 16px;background:#fff;color:#111}
+ h1{font-size:26px;margin:6px 0 14px}
+ textarea{width:100%;box-sizing:border-box;min-height:150px;font:inherit;padding:10px;border:2px solid #333;border-radius:10px}
+ .row{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:12px 0}
+ select,input,button{font:inherit}
+ select,input[type=text]{padding:6px 8px;border:1px solid #666;border-radius:8px}
+ button{padding:10px 18px;border:2px solid #111;border-radius:10px;background:#111;color:#fff;cursor:pointer}
+ button.light{background:#fff;color:#111}
+ button:disabled{opacity:.5;cursor:wait}
+ #status{font-weight:600;min-height:1.5em}
+ .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}
+ .stat{border:2px solid #111;border-radius:10px;padding:10px}
+ .stat b{display:block;font-size:26px} .stat span{font-size:14px;opacity:.75}
+ audio{width:100%;margin:8px 0}
+ table{width:100%;border-collapse:collapse;font-size:14px;margin-top:10px}
+ th,td{border-bottom:1px solid #ccc;padding:6px;text-align:left} td button{padding:4px 10px;font-size:13px}
+ .hint{font-size:14px;opacity:.75}
+</style></head><body>
+<h1>Kokoro TTS Lab <span class="hint">(runs on the mini PC CPU)</span></h1>
+
+<div class="row">
+ <button class="light" data-s="kid">Kid answer (~55 words)</button>
+ <button class="light" data-s="short">Short (~12 words)</button>
+ <button class="light" data-s="long">Long (~130 words)</button>
+</div>
+<textarea id="text"></textarea>
+
+<div class="row">
+ <label>Voice <select id="voice"><option>af_heart</option></select></label>
+ <label>or blend <input id="blend" type="text" placeholder="af_heart+af_bella" size="18"></label>
+ <label>Speed <input id="speed" type="range" min="0.6" max="1.6" step="0.05" value="1"> <span id="speedv">1.00</span></label>
+ <label>Format <select id="fmt"><option>mp3</option><option>wav</option></select></label>
+</div>
+<div class="row">
+ <button id="go">▶ Generate &amp; play</button>
+ <span class="hint">Voice names: a = American, b = British; f = female, m = male (e.g. af_heart, am_michael, bf_emma).</span>
+</div>
+
+<div id="status"></div>
+<div class="stats">
+ <div class="stat"><b id="s_first">–</b><span>first audio arrived (s)</span></div>
+ <div class="stat"><b id="s_total">–</b><span>full audio generated (s)</span></div>
+ <div class="stat"><b id="s_len">–</b><span>length of speech (s)</span></div>
+ <div class="stat"><b id="s_rtf">–</b><span>speed vs real time (× faster)</span></div>
+</div>
+<audio id="player" controls></audio>
+
+<table><thead><tr><th>Voice</th><th>Speed</th><th>Words</th><th>First (s)</th><th>Total (s)</th><th>Speech (s)</th><th>× real time</th><th></th></tr></thead>
+<tbody id="hist"></tbody></table>
+
+<script>
+const $ = id => document.getElementById(id);
+const SAMPLES = {
+ kid: "Wowww, what a brilliant question! Do you know why the sky is blue? Sunlight is made of lots of colours all mixed together. When it zooms into the air, the blue light bounces around everywhere, like a bouncy ball in a playground! So when you look up, you see blue all over. Isn't that super cool?",
+ short: "Ooh, guess what? A squid has ten arms. Eight arms and two long tentacles!",
+ long: "Oh my goodness, the moon is such a fun thing to think about! Guess what? The moon does not make its own light. It is like a giant mirror in the sky. The sun shines on the moon, and the moon bounces that light down to us. That is why it glows at night. And here is the fun part! The moon looks like it changes shape. Sometimes it is a big round circle, and sometimes it is a thin smiley banana. But the moon is not really changing. We are just seeing different parts of it lit up by the sun, as it travels around our Earth. It takes about one month for the moon to go all the way around. Next time you see the moon, can you guess which shape it will be?"
+};
+document.querySelectorAll('[data-s]').forEach(b => b.onclick = () => $('text').value = SAMPLES[b.dataset.s]);
+$('text').value = SAMPLES.kid;
+$('speed').oninput = () => $('speedv').textContent = (+$('speed').value).toFixed(2);
+
+fetch('/v1/audio/voices').then(r => r.json()).then(d => {
+  const sel = $('voice'); sel.innerHTML = '';
+  // each voice is either a plain name or {id, overall_grade, ...}
+  const ids = (d.voices || []).map(v => {
+    const id = typeof v === 'string' ? v : v.id, o = document.createElement('option');
+    o.value = id; o.textContent = id + (v.overall_grade ? `  (grade ${v.overall_grade})` : '');
+    sel.appendChild(o); return id;
+  });
+  sel.value = ids.includes('af_heart') ? 'af_heart' : ids[0];
+}).catch(() => $('status').textContent = 'Could not load the voice list – is the Kokoro container running?');
+
+const status = t => $('status').textContent = t;
+let actx;
+
+$('go').onclick = async () => {
+  const text = $('text').value.trim(); if (!text) return;
+  const voice = $('blend').value.trim() || $('voice').value;
+  const speed = +$('speed').value, fmt = $('fmt').value;
+  ['s_first','s_total','s_len','s_rtf'].forEach(id => $(id).textContent = '…');
+  $('go').disabled = true; status('Generating on the mini PC…');
+  const t0 = performance.now(); let tFirst = null;
+  try {
+    const r = await fetch('/v1/audio/speech', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({model: 'kokoro', input: text, voice, speed, response_format: fmt, stream: true})});
+    if (!r.ok) throw new Error(r.status + ' ' + (await r.text()).slice(0, 200));
+    const reader = r.body.getReader(), parts = [];
+    let bytes = 0;
+    for (;;) {
+      const {done, value} = await reader.read(); if (done) break;
+      bytes += value.length;
+      if (tFirst === null && bytes > 4000) {   // skip the tiny header chunk; count real audio
+ tFirst = (performance.now() - t0) / 1000; $('s_first').textContent = tFirst.toFixed(2); }
+      parts.push(value);
+    }
+    const total = (performance.now() - t0) / 1000;
+    const blob = new Blob(parts, {type: fmt === 'mp3' ? 'audio/mpeg' : 'audio/wav'});
+    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+    const len = (await actx.decodeAudioData(await blob.arrayBuffer())).duration;
+    const rtf = len / total;
+    $('s_total').textContent = total.toFixed(2);
+    $('s_len').textContent = len.toFixed(1);
+    $('s_rtf').textContent = rtf.toFixed(1) + '×';
+    const url = URL.createObjectURL(blob);
+    $('player').src = url; $('player').play().catch(() => {});
+    status(`Done: ${len.toFixed(1)} s of speech made in ${total.toFixed(2)} s.`);
+    const words = text.split(/\s+/).length;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${voice}</td><td>${speed.toFixed(2)}</td><td>${words}</td><td>${tFirst.toFixed(2)}</td>` +
+                   `<td>${total.toFixed(2)}</td><td>${len.toFixed(1)}</td><td>${rtf.toFixed(1)}×</td><td><button>▶</button></td>`;
+    tr.querySelector('button').onclick = () => { $('player').src = url; $('player').play(); };
+    $('hist').prepend(tr);
+  } catch (e) { status('Error: ' + e.message); }
+  $('go').disabled = false;
+};
+</script></body></html>

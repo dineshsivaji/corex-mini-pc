@@ -35,6 +35,7 @@ import asyncio
 import contextlib
 import json
 import os
+import random
 import re
 import tempfile
 import time
@@ -381,9 +382,11 @@ async def lifespan(_: FastAPI):
     await browser.start()
     warm = asyncio.create_task(browser.warm_up())  # open + persona in the background
     task = asyncio.create_task(idle_closer())
+    prewarm = asyncio.create_task(_prewarm_phrases())  # Kokoro fixed phrases for /voice-kokoro
     yield
     task.cancel()
     warm.cancel()
+    prewarm.cancel()
     await browser.stop()
 
 
@@ -598,12 +601,16 @@ class SpeakRequest(BaseModel):
 @app.post("/voice/speak")
 async def voice_speak(req: SpeakRequest | None = None) -> dict:
     """Speak text on the Nest Mini. With no text: repeat the last answer."""
+    return await _voice_speak(req, ha_speak)
+
+
+async def _voice_speak(req: SpeakRequest | None, speak_fn) -> dict:
     text = (req.text if req and req.text else None) or (browser.last or {}).get("answer")
     if not text:
         raise HTTPException(404, "nothing to repeat yet")
     text = clean_for_speech(text) or text
     try:
-        await ha_speak(text)
+        await speak_fn(text)
     except Exception as e:
         raise HTTPException(502, f"speaker failed: {e}") from e
     return {"spoken": True, "text": text}
@@ -611,6 +618,11 @@ async def voice_speak(req: SpeakRequest | None = None) -> dict:
 
 @app.post("/voice/ask")
 async def voice_ask(audio: UploadFile = File(...), speak: bool = Form(True)) -> dict:
+    return await _voice_ask(audio, speak, ha_speak)
+
+
+async def _voice_ask(audio: UploadFile, speak: bool, speak_fn) -> dict:
+    """Recording → Whisper → ChatGPT → speak_fn(answer) on the Nest Mini."""
     t0 = time.time()
     raw = await audio.read()
     if not raw:
@@ -642,7 +654,7 @@ async def voice_ask(audio: UploadFile = File(...), speak: bool = Form(True)) -> 
     spoken, speak_error = False, None
     if speak:
         try:
-            await ha_speak(answer)
+            await speak_fn(answer)
             spoken = True
         except Exception as e:
             speak_error = str(e)
@@ -666,18 +678,27 @@ async def voice_ask(audio: UploadFile = File(...), speak: bool = Form(True)) -> 
 VOICE_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Curious Buddy</title>
 <style>
- body{font:18px/1.5 system-ui,sans-serif;max-width:560px;margin:24px auto;padding:0 16px;text-align:center}
- .mic{display:block;width:100%;padding:28px 0;font-size:26px;border:0;border-radius:18px;
-      background:#2b7de9;color:#fff;cursor:pointer;user-select:none;-webkit-user-select:none}
- .mic.rec{background:#e5484d} .mic:disabled{opacity:.5}
- label.opt{display:block;margin:14px 0;font-size:16px}
- #status{min-height:1.5em;margin:12px 0;opacity:.8}
- .qa{text-align:left;margin-top:14px;padding:12px 14px;border-radius:12px;background:#8881}
- .q{font-weight:600} small{opacity:.6;display:block;margin-top:4px}
+ /* Big, high-contrast, black-and-white layout so it reads well on an e-ink screen */
+ body{font:28px/1.5 system-ui,sans-serif;max-width:900px;margin:20px auto;padding:0 16px;
+      text-align:center;background:#fff;color:#000}
+ h2{font-size:44px;margin:10px 0 20px}
+ .mic{display:block;width:100%;box-sizing:border-box;padding:40px 0;font-size:42px;font-weight:700;
+      border:4px solid #000;border-radius:20px;background:#000;color:#fff;cursor:pointer;
+      user-select:none;-webkit-user-select:none}
+ .mic.rec{background:#fff;color:#000;border:6px dashed #000}
+ .mic:disabled{background:#fff;color:#000;border-style:dotted}
+ label.opt{display:block;margin:20px 0;font-size:26px}
+ label.opt input{width:32px;height:32px;vertical-align:middle;margin-right:10px}
+ #status{min-height:1.5em;margin:16px 0;font-size:30px;font-weight:700}
+ .qa{text-align:left;margin-top:20px;padding:18px 20px;border:3px solid #000;border-radius:14px}
+ .q{font-weight:700;font-size:30px;margin-bottom:10px}
+ .a{font-size:34px;line-height:1.55}
+ small{display:block;margin-top:10px;font-size:20px}
  input[type=file]{display:none}
- .again{margin-top:8px;padding:8px 14px;font:inherit;font-size:15px;border:1px solid #8886;
-        border-radius:10px;background:transparent;color:inherit;cursor:pointer}
- #repeat{display:block;width:100%;margin-top:10px;padding:14px 0;font-size:18px}
+ .again{margin-top:14px;padding:16px 22px;font:inherit;font-size:26px;font-weight:700;
+        border:3px solid #000;border-radius:14px;background:#fff;color:#000;cursor:pointer}
+ #repeat{display:block;width:100%;margin-top:16px;padding:24px 0;font-size:32px}
+ #repeat:disabled{border-style:dotted}
 </style></head><body>
 <h2>🦉 Curious Buddy</h2>
 <button id="live" class="mic" hidden>🎤 Tap to talk</button>
@@ -781,6 +802,363 @@ if (window.isSecureContext && navigator.mediaDevices && window.MediaRecorder) {
 @app.get("/voice", response_class=HTMLResponse)
 async def voice_page() -> str:
     return VOICE_PAGE
+
+
+# ---------------------------------------------------------------------------
+# Trial page /voice-kokoro: kid mode + answers spoken with Kokoro TTS instead of HA's Piper.
+# Kokoro makes an MP3 here; we keep it in memory and ask HA to play its URL on the Nest Mini
+# (media_player.play_media), so no HA configuration is needed.
+#
+# One question at a time: a small state machine  idle → thinking → speaking → idle.
+# While not idle, new questions/replays get 409. "speaking" ends when HA reports the Nest Mini
+# stopped playing our clip (with a time cap in case HA never reports it).
+KOKORO_URL = os.environ.get("KOKORO_URL", "http://127.0.0.1:8880").rstrip("/")
+KOKORO_VOICE = os.environ.get("KOKORO_VOICE", "af_heart")
+KOKORO_SPEED = float(os.environ.get("KOKORO_SPEED", "1.0"))
+KOKORO_SLOW_SPEED = float(os.environ.get("KOKORO_SLOW_SPEED", "0.85"))  # the "Slower" button
+KOKORO_KEEP = 60  # cached clips (answers + fixed phrases); same text → no re-generation
+
+# Said right after the question was understood, while ChatGPT works (one at random, no repeats).
+HEARD_PHRASES = [
+    "Ooh, good one!", "Hmm, let me think!", "Let me find out!", "Okay, thinking cap on!",
+    "Ooh, let me look in my brain!", "One moment!", "Hmm, let me see!",
+]
+SAY = {
+    "no_words": "Oops, I didn't hear you. Tap and try again!",
+    "ai_failed": "Oh no, my brain got tangled! Can you ask me again?",
+}
+# Quick-reply buttons on the page → what is sent to ChatGPT (same chat, so "that" has context).
+QUICK_REPLIES = {
+    "more": "Tell me more about that!",
+    "why": "Why is that?",
+    "easier": "I didn't understand. Can you say it in a simpler way?",
+    "quiz": "Ask me one fun quiz question about this, then wait for my answer.",
+    "yes": "Yes!",
+    "tellme": "I don't know, tell me!",
+}
+
+
+def _lan_base_url() -> str:
+    """URL the Nest Mini can fetch audio from: http://<this PC's LAN IP>:PORT (override MEDIA_BASE_URL)."""
+    if os.environ.get("MEDIA_BASE_URL"):
+        return os.environ["MEDIA_BASE_URL"].rstrip("/")
+    import socket
+    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as s:
+        s.connect(("10.255.255.255", 1))  # no packet is sent; just picks the LAN interface
+        return f"http://{s.getsockname()[0]}:{PORT}"
+
+
+# ---------- clips (Kokoro audio, cached by text + voice + speed) ----------
+_clips: dict[str, dict] = {}  # id -> {"mp3": bytes, "seconds": float}; insertion order = age
+
+
+def _kokoro_tts_blocking(text: str, speed: float) -> bytes:
+    body = {"model": "kokoro", "input": text, "voice": KOKORO_VOICE, "speed": speed,
+            "response_format": "mp3", "stream": False}
+    req = urllib.request.Request(f"{KOKORO_URL}/v1/audio/speech", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return r.read()
+
+
+async def _mp3_seconds(mp3: bytes, text: str, speed: float) -> float:
+    with tempfile.NamedTemporaryFile(suffix=".mp3") as f:
+        f.write(mp3)
+        f.flush()
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", f.name,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await proc.communicate()
+    try:
+        return float(out.strip())
+    except ValueError:
+        return len(text.split()) / (2.7 * speed)  # rough words-per-second estimate
+
+
+async def get_clip(text: str, speed: float | None = None) -> str:
+    """Return the id of an MP3 for this text, making it with Kokoro only if not cached."""
+    import hashlib
+    speed = speed or KOKORO_SPEED
+    clip_id = hashlib.sha1(f"{KOKORO_VOICE}|{speed}|{text}".encode()).hexdigest()[:16]
+    if clip_id in _clips:
+        _clips[clip_id] = _clips.pop(clip_id)  # mark as recently used
+        return clip_id
+    t0 = time.time()
+    try:
+        mp3 = await asyncio.to_thread(_kokoro_tts_blocking, text, speed)
+    except Exception as e:
+        raise RuntimeError(f"Kokoro failed ({KOKORO_URL}): {e}") from e
+    _clips[clip_id] = {"mp3": mp3, "seconds": await _mp3_seconds(mp3, text, speed)}
+    while len(_clips) > KOKORO_KEEP:
+        _clips.pop(next(iter(_clips)))
+    print(f"[kokoro] {len(text.split())} words → {_clips[clip_id]['seconds']:.1f}s of speech "
+          f"in {time.time() - t0:.1f}s")
+    return clip_id
+
+
+@app.get("/kokoro-audio/{clip_id}.mp3")
+async def kokoro_audio(clip_id: str) -> Response:
+    clip = _clips.get(clip_id)
+    if clip is None:
+        raise HTTPException(404, "clip expired")
+    return Response(clip["mp3"], media_type="audio/mpeg")
+
+
+# ---------- Home Assistant: play / stop / watch the Nest Mini ----------
+def _ha_call_blocking(path: str, body: dict | None = None):
+    req = urllib.request.Request(
+        f"{HA_URL}{path}", data=json.dumps(body).encode() if body is not None else None,
+        headers={"Authorization": f"Bearer {HA_TOKEN}", "Content-Type": "application/json"},
+        method="POST" if body is not None else "GET",
+    )
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read() or b"null")
+
+
+async def ha(path: str, body: dict | None = None):
+    if not HA_TOKEN:
+        raise RuntimeError("HA_TOKEN not set")
+    return await asyncio.to_thread(_ha_call_blocking, path, body)
+
+
+async def play_clip(clip_id: str) -> str:
+    url = f"{_lan_base_url()}/kokoro-audio/{clip_id}.mp3"
+    await ha("/api/services/media_player/play_media",
+             {"entity_id": HA_SPEAKER, "media_content_id": url, "media_content_type": "audio/mpeg"})
+    return url
+
+
+async def wait_until_played(url: str, seconds: float) -> None:
+    """Return when the Nest Mini has finished playing `url` (or something else took over).
+    Never waits longer than the clip length + 5 s; if HA never shows it playing, waits the clip length."""
+    t0 = time.time()
+    cap = min(seconds + 5, 180)
+    started = False
+    while time.time() - t0 < cap:
+        try:
+            st = await ha(f"/api/states/{HA_SPEAKER}")
+            ours = st["state"] == "playing" and st["attributes"].get("media_content_id") == url
+        except Exception:
+            ours = None  # HA unreachable: fall back to the clip length
+        if ours:
+            started = True
+        elif started and ours is False:
+            return  # finished, stopped, or replaced by other audio
+        elif not started and time.time() - t0 > 8:
+            await asyncio.sleep(max(0.0, seconds + 1 - (time.time() - t0)))  # never seen playing
+            return
+        await asyncio.sleep(0.5)
+
+
+# ---------- the one-at-a-time state ----------
+class KidVoice:
+    def __init__(self) -> None:
+        self.state = "idle"     # idle | thinking | speaking
+        self.since = time.time()
+        self.token = 0          # bumps on every new action, so stale watchers don't reset a newer one
+        self.question = ""
+        self.answer = ""
+        self._last_heard = ""
+
+    def begin(self, question: str = "") -> int:
+        """Claim the speaker for a new action, or 409 if busy. No await → atomic in asyncio."""
+        if self.state != "idle":
+            raise HTTPException(409, f"busy: {self.state}")
+        self.token += 1
+        self._set("thinking")
+        self.question = question
+        return self.token
+
+    def _set(self, state: str) -> None:
+        self.state, self.since = state, time.time()
+
+    def finish(self, token: int) -> None:
+        if token == self.token:
+            self._set("idle")
+
+    async def speak(self, token: int, text: str, speed: float | None = None) -> None:
+        """Make (or reuse) the clip, play it, and go back to idle once the Nest Mini finishes."""
+        try:
+            clip_id = await get_clip(text, speed)
+            if token != self.token:
+                return  # grown-up pressed Stop meanwhile
+            url = await play_clip(clip_id)
+        except Exception:
+            self.finish(token)
+            raise
+        self._set("speaking")
+        asyncio.create_task(self._watch(token, url, _clips[clip_id]["seconds"]))
+
+    async def _watch(self, token: int, url: str, seconds: float) -> None:
+        with contextlib.suppress(Exception):
+            await wait_until_played(url, seconds)
+        self.finish(token)
+
+    def heard_phrase(self) -> str:
+        options = [p for p in HEARD_PHRASES if p != self._last_heard] or HEARD_PHRASES
+        self._last_heard = random.choice(options)
+        return self._last_heard
+
+    def snapshot(self) -> dict:
+        return {"state": self.state, "seconds": round(time.time() - self.since, 1),
+                "question": self.question, "answer": self.answer,
+                "asks_back": self.answer.rstrip().endswith("?")}
+
+
+kid = KidVoice()
+
+
+async def _prewarm_phrases() -> None:
+    """Make the fixed phrases once at startup so they play instantly (Kokoro may still be starting)."""
+    for _ in range(20):
+        try:
+            for text in [*HEARD_PHRASES, *SAY.values()]:
+                await get_clip(text)
+            print(f"[kokoro] {len(HEARD_PHRASES) + len(SAY)} fixed phrases ready")
+            return
+        except Exception:
+            await asyncio.sleep(15)
+
+
+async def _say_and_wait(text: str) -> None:
+    """Play a short fixed phrase and wait for it to finish (used for spoken errors)."""
+    with contextlib.suppress(Exception):
+        clip_id = await get_clip(text)
+        await wait_until_played(await play_clip(clip_id), _clips[clip_id]["seconds"])
+
+
+async def _kid_answer(token: int, question: str, t0: float, t_stt: float, filler: bool) -> dict:
+    """Ask ChatGPT (with an instant 'let me think' phrase meanwhile) and speak the answer."""
+    filler_task = None
+    if filler:
+        async def _filler():
+            clip_id = await get_clip(kid.heard_phrase())
+            await wait_until_played(await play_clip(clip_id), _clips[clip_id]["seconds"])
+        filler_task = asyncio.create_task(_filler())
+    try:
+        answer = await browser.ask(question)
+    except Exception as e:
+        if filler_task:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(filler_task, 8)
+        await _say_and_wait(SAY["ai_failed"])
+        kid.finish(token)
+        raise HTTPException(502, f"ChatGPT failed: {e}") from e
+    t_ai = time.time()
+    kid.answer = answer
+    if filler_task:  # let "Hmm, let me think!" finish before the answer starts
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(filler_task, 8)
+    speak_error = None
+    try:
+        await kid.speak(token, answer)
+    except Exception as e:
+        speak_error = str(e)
+    print(f"[kid] q={question!r} a={answer[:60]!r}... {speak_error or ''}")
+    return {
+        "heard": question, "answer": answer, "asks_back": answer.rstrip().endswith("?"),
+        "spoken": speak_error is None, "speak_error": speak_error,
+        "seconds": {"stt": round(t_stt - t0, 1), "chatgpt": round(t_ai - t_stt, 1),
+                    "speak": round(time.time() - t_ai, 1), "total": round(time.time() - t0, 1)},
+    }
+
+
+@app.get("/voice-kokoro/state")
+async def kid_state() -> dict:
+    return kid.snapshot()
+
+
+@app.post("/voice-kokoro/warm")
+async def kid_warm() -> dict:
+    """Called when the child taps the mic: open ChatGPT now if it was closed for being idle."""
+    if not browser.is_open and not browser.lock.locked():
+        asyncio.create_task(browser.warm_up())
+        return {"warming": True}
+    return {"warming": False}
+
+
+@app.post("/voice-kokoro/ask")
+async def kid_ask(audio: UploadFile = File(...)) -> dict:
+    token = kid.begin()
+    t0 = time.time()
+    try:
+        raw = await audio.read()
+        if not raw or len(raw) > MAX_UPLOAD_BYTES:
+            raise HTTPException(400, "empty or too large recording")
+        text = await whisper_transcribe(await to_pcm16k(raw))
+    except HTTPException:
+        kid.finish(token)
+        raise
+    except Exception as e:
+        kid.finish(token)
+        raise HTTPException(502, f"speech-to-text failed: {e}") from e
+    t_stt = time.time()
+    if not text:
+        await _say_and_wait(SAY["no_words"])
+        kid.finish(token)
+        raise HTTPException(422, "I couldn't hear any words - try again closer to the mic")
+    kid.question = text
+    if is_repeat_request(text) and browser.last:  # "say that again" → cached clip, no ChatGPT
+        kid.answer = browser.last["answer"]
+        try:
+            await kid.speak(token, kid.answer)
+        except Exception as e:
+            raise HTTPException(502, f"speaker failed: {e}") from e
+        return {"heard": text, "answer": kid.answer, "repeated": True, "spoken": True,
+                "asks_back": kid.answer.rstrip().endswith("?"),
+                "seconds": {"stt": round(t_stt - t0, 1), "total": round(time.time() - t0, 1)}}
+    return await _kid_answer(token, text, t0, t_stt, filler=True)
+
+
+class QuickReply(BaseModel):
+    kind: str  # a key of QUICK_REPLIES
+
+
+@app.post("/voice-kokoro/quick")
+async def kid_quick(req: QuickReply) -> dict:
+    question = QUICK_REPLIES.get(req.kind)
+    if not question:
+        raise HTTPException(400, f"unknown quick reply {req.kind!r}")
+    token = kid.begin(question)
+    t0 = time.time()
+    return await _kid_answer(token, question, t0, t0, filler=False)
+
+
+class KidSpeak(BaseModel):
+    text: str | None = None  # omit → the last answer
+    slow: bool = False
+
+
+@app.post("/voice-kokoro/speak")
+async def kid_speak(req: KidSpeak | None = None) -> dict:
+    """Replay (cached clip → starts in ~1-2 s). slow=True uses KOKORO_SLOW_SPEED."""
+    req = req or KidSpeak()
+    text = req.text or kid.answer or (browser.last or {}).get("answer")
+    if not text:
+        raise HTTPException(404, "nothing to repeat yet")
+    text = clean_for_speech(text) or text
+    token = kid.begin(kid.question)
+    try:
+        await kid.speak(token, text, KOKORO_SLOW_SPEED if req.slow else None)
+    except Exception as e:
+        raise HTTPException(502, f"speaker failed: {e}") from e
+    return {"spoken": True, "text": text}
+
+
+@app.post("/voice-kokoro/stop")
+async def kid_stop() -> dict:
+    """Grown-up Stop: silence the Nest Mini and unlock the page."""
+    kid.token += 1
+    kid._set("idle")
+    with contextlib.suppress(Exception):
+        await ha("/api/services/media_player/media_stop", {"entity_id": HA_SPEAKER})
+    return kid.snapshot()
+
+
+@app.get("/voice-kokoro", response_class=HTMLResponse)
+async def voice_kokoro_page() -> str:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice_kokoro.html")) as f:
+        return f.read()
 
 
 if __name__ == "__main__":

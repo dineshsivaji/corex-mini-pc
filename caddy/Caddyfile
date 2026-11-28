@@ -21,6 +21,20 @@
 		reverse_proxy 127.0.0.1:8123
 	}
 
+	# Kokoro TTS test page: static page from /srv/tts-lab, API calls (/v1/*) to the Kokoro container
+	@tts host tts.{$LOCAL_DOMAIN}
+	handle @tts {
+		handle /v1/* {
+			reverse_proxy 127.0.0.1:8880 {
+				flush_interval -1
+			}
+		}
+		handle {
+			root * /srv/tts-lab
+			file_server
+		}
+	}
+
 	# Unknown sub-domain
 	handle {
 		abort

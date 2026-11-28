@@ -1,0 +1,10 @@
+# Kokoro TTS test (CPU). Not connected to Home Assistant.
+#   docker compose up -d        # first start downloads the image (~several GB) and the model
+#   test page: https://tts.<LOCAL_DOMAIN>  (Caddy serves ./web and proxies /v1/* to :8880)
+services:
+  kokoro:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    container_name: kokoro-tts
+    ports:
+      - "127.0.0.1:8880:8880"   # local only; reached through Caddy
+    restart: unless-stopped
