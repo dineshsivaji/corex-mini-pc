@@ -55,7 +55,7 @@ const $ = id => document.getElementById(id);
 if (new URLSearchParams(location.search).has('grownup')) $('grown').open = true;
 
 const NORMAL = [['more', '➕ Tell me more!'], ['why', '🤔 Why?'], ['easier', '🧸 Say it easier'], ['quiz', '❓ Quiz me!']];
-const ASKS_BACK = [['yes', '✅ Yes!'], ['tellme', '🙋 Tell me!'], ['guess', '🎤 I\'ll guess'], ['more', '➕ Tell me more!']];
+const ASKS_BACK = [['yes', '✅ Yes!'], ['tellme', '🙋 Tell me!'], ['no', '❌ No, thanks'], ['more', '➕ Tell me more!']];
 const WORDS = {idle: 'Tap and ask me!', thinking: 'Thinking…', speaking: 'Listen to the speaker!',
                recording: 'I\'m listening…', sending: 'Thinking…'};
 
@@ -79,16 +79,24 @@ function draw(msg) {
   $('quick').hidden = $('replay').hidden = !haveAnswer;
 }
 
-function showAnswer(question, answer, asksBack) {
+function showAnswer(question, answer, asksBack, options) {
   $('card').hidden = false;
   $('q').textContent = '“' + question + '”';
   $('a').textContent = answer;
   const q = $('quick'); q.innerHTML = '';
-  (asksBack ? ASKS_BACK : NORMAL).forEach(([kind, label]) => {
-    const b = document.createElement('button'); b.textContent = label;
-    b.onclick = () => kind === 'guess' ? startRecording() : quick(kind, label);
-    q.appendChild(b);
-  });
+  if (options && options.length) {          // multiple choice: one button per option
+    options.forEach(o => {
+      const b = document.createElement('button'); b.textContent = o.letter + '. ' + o.text;
+      b.onclick = () => quick('option', o.letter);
+      q.appendChild(b);
+    });
+  } else {
+    (asksBack ? ASKS_BACK : NORMAL).forEach(([kind, label]) => {
+      const b = document.createElement('button'); b.textContent = label;
+      b.onclick = () => quick(kind);
+      q.appendChild(b);
+    });
+  }
   haveAnswer = true; shown = '';
 }
 
@@ -137,13 +145,13 @@ async function post(url, body, isForm) {
 
 async function handleAnswer(d) {
   if (!d || !d.answer) return;
-  showAnswer(d.heard, d.answer, d.asks_back);
+  showAnswer(d.heard, d.answer, d.asks_back, d.options);
   addHistory(d.heard, d.answer, d.seconds);
   if (d.speak_error) $('timing').textContent += ' · speaker: ' + d.speak_error;
   poll();
 }
 
-async function quick(kind, label) { clearAnswer(); handleAnswer(await post('/voice-kokoro/quick', {kind})); }
+async function quick(kind, letter) { clearAnswer(); handleAnswer(await post('/voice-kokoro/quick', {kind, letter})); }
 $('again').onclick = () => post('/voice-kokoro/speak', {});
 $('slower').onclick = () => post('/voice-kokoro/speak', {slow: true});
 $('stop').onclick = async () => { local = null; await fetch('/voice-kokoro/stop', {method: 'POST'}); poll(); };

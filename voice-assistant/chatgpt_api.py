@@ -840,7 +840,33 @@ QUICK_REPLIES = {
     "quiz": "Ask me one fun quiz question about this, then wait for my answer.",
     "yes": "Yes!",
     "tellme": "I don't know, tell me!",
+    "no": "No, thank you.",
 }
+
+
+# Multiple-choice answers ("A. Lion B. Hippo C. Zebra") → option buttons on the page.
+_OPTION_MARK = re.compile(r"(?:^|(?<=\s))\(?([A-D])[.)]\s+")
+
+
+def parse_options(text: str) -> list[dict]:
+    """[{"letter": "A", "text": "Lion"}, ...] when the answer has options A, B(, C, D) in order,
+    each letter exactly once. Anything else (repeats, gaps, a single option) → [] (no buttons)."""
+    marks = list(_OPTION_MARK.finditer(text))
+    letters = [m.group(1) for m in marks]
+    if len(letters) < 2 or letters != list("ABCD"[:len(letters)]):
+        return []
+    options = []
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+        label = text[m.end():end].strip()
+        if i == len(marks) - 1:  # last option runs to the end: keep only its first sentence/line
+            label = re.split(r"(?<=[.!?])\s|\n|\s(?=(?:Which|What|Who|Where|Can|Do|Is|Are|How|Take|Pick|"
+                             r"Choose|Guess|Tell|Think|Hmm|Ooh)\b)", label, maxsplit=1)[0]
+        label = re.sub(r"[\s,;.?!]*(\bor)?[\s,;.?!]*$", "", label).strip()
+        if not label:
+            return []
+        options.append({"letter": m.group(1), "text": label[:60]})
+    return options
 
 
 def _lan_base_url() -> str:
@@ -963,6 +989,7 @@ class KidVoice:
         self.token = 0          # bumps on every new action, so stale watchers don't reset a newer one
         self.question = ""
         self.answer = ""
+        self.options: list[dict] = []  # A/B/C/D choices in the last answer
         self._last_heard = ""
 
     def begin(self, question: str = "") -> int:
@@ -1007,7 +1034,7 @@ class KidVoice:
     def snapshot(self) -> dict:
         return {"state": self.state, "seconds": round(time.time() - self.since, 1),
                 "question": self.question, "answer": self.answer,
-                "asks_back": self.answer.rstrip().endswith("?")}
+                "asks_back": self.answer.rstrip().endswith("?"), "options": self.options}
 
 
 kid = KidVoice()
@@ -1051,6 +1078,7 @@ async def _kid_answer(token: int, question: str, t0: float, t_stt: float, filler
         raise HTTPException(502, f"ChatGPT failed: {e}") from e
     t_ai = time.time()
     kid.answer = answer
+    kid.options = parse_options((browser.last or {}).get("answer_raw") or answer)
     if filler_task:  # let "Hmm, let me think!" finish before the answer starts
         with contextlib.suppress(Exception):
             await asyncio.wait_for(filler_task, 8)
@@ -1062,6 +1090,7 @@ async def _kid_answer(token: int, question: str, t0: float, t_stt: float, filler
     print(f"[kid] q={question!r} a={answer[:60]!r}... {speak_error or ''}")
     return {
         "heard": question, "answer": answer, "asks_back": answer.rstrip().endswith("?"),
+        "options": kid.options,
         "spoken": speak_error is None, "speak_error": speak_error,
         "seconds": {"stt": round(t_stt - t0, 1), "chatgpt": round(t_ai - t_stt, 1),
                     "speak": round(time.time() - t_ai, 1), "total": round(time.time() - t0, 1)},
@@ -1105,23 +1134,29 @@ async def kid_ask(audio: UploadFile = File(...)) -> dict:
     kid.question = text
     if is_repeat_request(text) and browser.last:  # "say that again" → cached clip, no ChatGPT
         kid.answer = browser.last["answer"]
+        kid.options = parse_options(browser.last.get("answer_raw") or kid.answer)
         try:
             await kid.speak(token, kid.answer)
         except Exception as e:
             raise HTTPException(502, f"speaker failed: {e}") from e
         return {"heard": text, "answer": kid.answer, "repeated": True, "spoken": True,
-                "asks_back": kid.answer.rstrip().endswith("?"),
+                "asks_back": kid.answer.rstrip().endswith("?"), "options": kid.options,
                 "seconds": {"stt": round(t_stt - t0, 1), "total": round(time.time() - t0, 1)}}
     return await _kid_answer(token, text, t0, t_stt, filler=True)
 
 
 class QuickReply(BaseModel):
-    kind: str  # a key of QUICK_REPLIES
+    kind: str                 # a key of QUICK_REPLIES, or "option"
+    letter: str | None = None  # with kind="option": A/B/C/D from the last answer
 
 
 @app.post("/voice-kokoro/quick")
 async def kid_quick(req: QuickReply) -> dict:
-    question = QUICK_REPLIES.get(req.kind)
+    if req.kind == "option":
+        opt = next((o for o in kid.options if o["letter"] == (req.letter or "").upper()), None)
+        question = f"{opt['letter']}. {opt['text']}" if opt else None
+    else:
+        question = QUICK_REPLIES.get(req.kind)
     if not question:
         raise HTTPException(400, f"unknown quick reply {req.kind!r}")
     token = kid.begin(question)
