@@ -831,6 +831,7 @@ HEARD_PHRASES = [
 SAY = {
     "no_words": "Oops, I didn't hear you. Tap and try again!",
     "ai_failed": "Oh no, my brain got tangled! Can you ask me again?",
+    "play": "Yay! Let's play!",  # said when a game starts
 }
 # Quick-reply buttons on the page → what is sent to ChatGPT (same chat, so "that" has context).
 QUICK_REPLIES = {
@@ -840,7 +841,42 @@ QUICK_REPLIES = {
     "quiz": "Ask me one fun quiz question about this, then wait for my answer.",
     "yes": "Yes!",
     "tellme": "I don't know, tell me!",
-    "no": "No, thank you.",
+    # game buttons
+    "clue": "Give me another clue, please!",
+    "giveup": "I give up! What is it?",
+    "another_wyr": "Another would you rather, please!",
+    "riddle_clue": "Can I have a clue?",
+    "riddle_answer": "Tell me the answer!",
+    "another_riddle": "Tell me another riddle!",
+    "end_story": "Please finish the story with a happy ending.",
+    "another_word": "Teach me another new word!",
+    "use_again": "Use that word in another sentence, please!",
+}
+
+# Play modes: one tap sends the game rules to ChatGPT; the game then continues in the same chat.
+QUIZ_TOPICS = ["animals", "space", "the ocean", "dinosaurs", "our body", "plants and flowers",
+               "the weather", "bugs and insects", "fruits and vegetables", "birds"]
+QUIZ_LENGTH = 5
+PLAY_MODES = {
+    "quiz": ("Quiz game", f"Let's play a quiz game about {{topic}}! Ask me {QUIZ_LENGTH} easy quiz questions, "
+             "one at a time. Every question must have four options written as A. B. C. and D. "
+             "When I answer, start your reply with exactly 'Correct!' if I was right, or 'Good try!' if I was "
+             "wrong, explain in one short sentence, then ask the next question. "
+             f"After my answer to question {QUIZ_LENGTH}, tell me my score and cheer for me."),
+    "animal": ("Guess the animal", "Let's play Guess the Animal! Think of an animal but don't tell me what it is. "
+               "Give me one easy clue, then give me four guesses to choose from, written as A. B. C. and D. "
+               "If I guess wrong, cheer me on and give me a new clue with new choices. "
+               "If I guess right, celebrate and tell me one fun fact about it."),
+    "wyr": ("Would you rather", "Let's play Would You Rather! Ask me one fun and silly 'would you rather' "
+            "question with two choices written as A. and B. When I choose, tell me something fun about "
+            "my choice."),
+    "riddle": ("Riddle time", "Let's play Riddle Time! Tell me one easy riddle for a five year old. "
+               "Don't tell me the answer until I guess it or ask for it."),
+    "story": ("Story together", "Let's make a story together! Tell the first part of a short, happy story in "
+              "three or four short sentences. Then give me two choices for what happens next, written as "
+              "A. and B. Keep going with my choices, and after four parts, finish with a happy ending."),
+    "word": ("New word", "Teach me one new, fun word! Say the word, tell me what it means in simple words, "
+             "and use it in a fun sentence. Then ask me to try saying it."),
 }
 
 
@@ -867,6 +903,84 @@ def parse_options(text: str) -> list[dict]:
             return []
         options.append({"letter": m.group(1), "text": label[:60]})
     return options
+
+
+# "… of the day": picked once per day by ChatGPT, then kept (same answer all day, replayed instantly).
+# Past picks are remembered so the same bird/joke doesn't come back soon.
+# kind: (button label, subject used in "Today's <subject> is …", extra instructions, follow-up group)
+OF_THE_DAY = {
+    "bird": ("🐦 Bird", "bird", "Pick a real bird kids would love. Say what it looks like, what sound it makes, "
+             "and one fun fact.", "learn"),
+    "animal": ("🐾 Animal", "animal", "Pick a real animal kids would love. Say where it lives and two fun facts.",
+               "learn"),
+    "sea": ("🐠 Sea creature", "sea creature", "Pick a real sea creature. Say where it lives in the sea and two "
+            "fun facts.", "learn"),
+    "dino": ("🦕 Dinosaur", "dinosaur", "Pick a real dinosaur. Say how big it was compared to things a child "
+             "knows, and what it ate.", "learn"),
+    "bug": ("🐞 Bug", "bug", "Pick a friendly bug or insect, not a scary one, and say two fun facts.", "learn"),
+    "plant": ("🌸 Flower or tree", "flower or tree", "Pick one flower or tree. Say what it looks like and one "
+              "fun fact.", "learn"),
+    "food": ("🍎 Fruit or veggie", "fruit or vegetable", "Pick one fruit or vegetable. Say its colour, how it "
+             "tastes, why it is good for us, and encourage me to try it.", "learn"),
+    "habit": ("🌟 Good habit", "good habit", "Pick one simple good habit, like washing hands or tidying toys. "
+              "Say why it is good and how I can do it today.", "habit"),
+    "kind": ("💛 Kindness", "kindness idea", "Give me one simple, kind thing I can do today for someone.",
+             "habit"),
+    "feeling": ("😊 Feeling", "feeling", "Pick one feeling, like proud or nervous. Explain what it feels like, "
+                "when we might feel it, and one thing I can do when I feel it.", "habit"),
+    "health": ("🦷 Healthy tip", "healthy tip", "Give me one healthy tip about teeth, sleep, water, food or "
+               "moving, and how I can do it today.", "habit"),
+    "thanks": ("🙏 Thank you", "thank-you", "Tell me one thing to be thankful for, then ask me what I am "
+               "thankful for today.", "none"),
+    "word": ("🔤 Word", "word", "Pick one new, fun word. Say what it means in simple words and use it in a fun "
+             "sentence. Then ask me to try saying it.", "learn"),
+    "number": ("🔢 Number", "number", "Pick a number from 1 to 20 and tell me fun things that come in that "
+               "number.", "learn"),
+    "country": ("🌍 Country", "country", "Pick one country. Tell me one colour of its flag, one animal that "
+                "lives there, and how to say hello there.", "learn"),
+    "space": ("🪐 Space fact", "space fact", "Tell me one amazing, true space fact in simple words.", "learn"),
+    "how": ("🔬 How it works", "how-it-works", "Pick one everyday thing, like rainbows, magnets or bubbles, and "
+            "explain how it works in simple words.", "learn"),
+    "colour": ("🎨 Colour", "colour", "Pick one colour. Tell me fun things that are this colour, and challenge "
+               "me to find three things of this colour around me.", "learn"),
+    "joke": ("😂 Joke", "joke", "Tell me one silly, kid-friendly joke.", "none"),
+    "riddle": ("🧩 Riddle", "riddle", "Tell me one easy riddle for a five year old. Don't tell me the answer.",
+               "riddle"),
+    "challenge": ("🎯 Challenge", "challenge", "Give me one safe, fun little challenge I can do at home in a "
+                  "minute. If it needs scissors, cooking or climbing, say a grown-up must help.", "none"),
+    "move": ("🤸 Move", "move", "Give me one fun, safe movement to do right now, like hopping like a frog five "
+             "times.", "none"),
+}
+OF_THE_DAY_FILE = os.environ.get(
+    "OF_THE_DAY_FILE", os.path.join(os.path.dirname(os.path.abspath(PROFILE_DIR)), "of_the_day.json"))
+
+
+def _otd_load() -> dict:
+    try:
+        with open(OF_THE_DAY_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {"days": {}, "history": {}}
+
+
+def _otd_save(data: dict) -> None:
+    data["days"] = {d: v for d, v in sorted(data["days"].items())[-7:]}  # keep a week of days
+    tmp = OF_THE_DAY_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=1, ensure_ascii=False)
+    os.replace(tmp, OF_THE_DAY_FILE)
+
+
+def _otd_today() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
+def _otd_name(raw: str) -> str:
+    """'Today's bird is the kingfisher! ...' → 'kingfisher' (used to avoid repeats and for follow-ups)."""
+    t = raw.replace("’", "'")
+    m = re.search(r"today'?s\s+[^.!?:]{0,40}?\s+(?:is|are)\s*:?\s*(?:the\s+|a\s+|an\s+)?([^.!?\n]{1,60})", t, re.I)
+    name = m.group(1) if m else re.split(r"[.!?]", t.strip(), maxsplit=1)[0]
+    return name.strip(" ,;:\"'")[:60]
 
 
 def _lan_base_url() -> str:
@@ -990,6 +1104,10 @@ class KidVoice:
         self.question = ""
         self.answer = ""
         self.options: list[dict] = []  # A/B/C/D choices in the last answer
+        self.mode: str | None = None    # current game (a PLAY_MODES key)
+        self.mode_chat = None           # which ChatGPT chat the game lives in
+        self.score = {"right": 0, "asked": 0}
+        self.today: dict = {}           # last "of the day" item shown: {"kind", "name", "answer"}
         self._last_heard = ""
 
     def begin(self, question: str = "") -> int:
@@ -1026,6 +1144,12 @@ class KidVoice:
             await wait_until_played(url, seconds)
         self.finish(token)
 
+    def current_mode(self) -> str | None:
+        """The game, unless ChatGPT has since started a new chat (idle close, restart) and forgot it."""
+        if self.mode and self.mode_chat is not None and self.mode_chat != browser.last_reload:
+            self.mode = None
+        return self.mode
+
     def heard_phrase(self) -> str:
         options = [p for p in HEARD_PHRASES if p != self._last_heard] or HEARD_PHRASES
         self._last_heard = random.choice(options)
@@ -1034,7 +1158,9 @@ class KidVoice:
     def snapshot(self) -> dict:
         return {"state": self.state, "seconds": round(time.time() - self.since, 1),
                 "question": self.question, "answer": self.answer,
-                "asks_back": self.answer.rstrip().endswith("?"), "options": self.options}
+                "asks_back": self.answer.rstrip().endswith("?"), "options": self.options,
+                "mode": self.current_mode(), "score": self.score,
+                "today_done": sorted(_otd_load()["days"].get(_otd_today(), {}))}
 
 
 kid = KidVoice()
@@ -1059,12 +1185,13 @@ async def _say_and_wait(text: str) -> None:
         await wait_until_played(await play_clip(clip_id), _clips[clip_id]["seconds"])
 
 
-async def _kid_answer(token: int, question: str, t0: float, t_stt: float, filler: bool) -> dict:
+async def _kid_answer(token: int, question: str, t0: float, t_stt: float, filler: bool | str,
+                      label: str | None = None) -> dict:
     """Ask ChatGPT (with an instant 'let me think' phrase meanwhile) and speak the answer."""
     filler_task = None
     if filler:
         async def _filler():
-            clip_id = await get_clip(kid.heard_phrase())
+            clip_id = await get_clip(filler if isinstance(filler, str) else kid.heard_phrase())
             await wait_until_played(await play_clip(clip_id), _clips[clip_id]["seconds"])
         filler_task = asyncio.create_task(_filler())
     try:
@@ -1078,7 +1205,17 @@ async def _kid_answer(token: int, question: str, t0: float, t_stt: float, filler
         raise HTTPException(502, f"ChatGPT failed: {e}") from e
     t_ai = time.time()
     kid.answer = answer
-    kid.options = parse_options((browser.last or {}).get("answer_raw") or answer)
+    raw = (browser.last or {}).get("answer_raw") or answer
+    kid.options = parse_options(raw)
+    if kid.mode and kid.mode_chat is None:
+        kid.mode_chat = browser.last_reload  # the game was just started in this chat
+    elif kid.current_mode() == "quiz":       # count answers: reply starts with Correct! / Good try!
+        head = re.sub(r"^\W+", "", raw).lower()
+        if head.startswith("correct"):
+            kid.score["right"] += 1
+            kid.score["asked"] += 1
+        elif head.startswith("good try"):
+            kid.score["asked"] += 1
     if filler_task:  # let "Hmm, let me think!" finish before the answer starts
         with contextlib.suppress(Exception):
             await asyncio.wait_for(filler_task, 8)
@@ -1089,8 +1226,8 @@ async def _kid_answer(token: int, question: str, t0: float, t_stt: float, filler
         speak_error = str(e)
     print(f"[kid] q={question!r} a={answer[:60]!r}... {speak_error or ''}")
     return {
-        "heard": question, "answer": answer, "asks_back": answer.rstrip().endswith("?"),
-        "options": kid.options,
+        "heard": label or question, "answer": answer, "asks_back": answer.rstrip().endswith("?"),
+        "options": kid.options, "mode": kid.current_mode(), "score": kid.score,
         "spoken": speak_error is None, "speak_error": speak_error,
         "seconds": {"stt": round(t_stt - t0, 1), "chatgpt": round(t_ai - t_stt, 1),
                     "speak": round(time.time() - t_ai, 1), "total": round(time.time() - t0, 1)},
@@ -1152,6 +1289,18 @@ class QuickReply(BaseModel):
 
 @app.post("/voice-kokoro/quick")
 async def kid_quick(req: QuickReply) -> dict:
+    if req.kind.startswith("today_") and kid.today:
+        name, answer = kid.today["name"], kid.today["answer"]
+        question = {
+            "today_more": f"Tell me more about {name}!",
+            "today_quiz": f"Ask me one fun quiz question about {name}, with four options written as A. B. C. and D.",
+            "today_answer": f"What is the answer to this riddle? {answer}",
+        }.get(req.kind)
+        if not question:
+            raise HTTPException(400, f"unknown quick reply {req.kind!r}")
+        token = kid.begin(question)
+        t0 = time.time()
+        return await _kid_answer(token, question, t0, t0, filler=True)
     if req.kind == "option":
         opt = next((o for o in kid.options if o["letter"] == (req.letter or "").upper()), None)
         question = f"{opt['letter']}. {opt['text']}" if opt else None
@@ -1162,6 +1311,68 @@ async def kid_quick(req: QuickReply) -> dict:
     token = kid.begin(question)
     t0 = time.time()
     return await _kid_answer(token, question, t0, t0, filler=True)
+
+
+class PlayRequest(BaseModel):
+    mode: str  # a PLAY_MODES key, or "stop"
+
+
+@app.post("/voice-kokoro/play")
+async def kid_play(req: PlayRequest) -> dict:
+    """Start a game (or 'stop' to leave it). The rules go to ChatGPT; the game continues in that chat."""
+    if req.mode == "stop":
+        kid.mode = None
+        return kid.snapshot()
+    if req.mode not in PLAY_MODES:
+        raise HTTPException(400, f"unknown game {req.mode!r}")
+    title, rules = PLAY_MODES[req.mode]
+    token = kid.begin(title)
+    kid.mode, kid.mode_chat, kid.score = req.mode, None, {"right": 0, "asked": 0}
+    t0 = time.time()
+    return await _kid_answer(token, rules.format(topic=random.choice(QUIZ_TOPICS)), t0, t0,
+                             filler=SAY["play"], label=title)
+
+
+class TodayRequest(BaseModel):
+    kind: str  # an OF_THE_DAY key
+
+
+@app.post("/voice-kokoro/today")
+async def kid_today(req: TodayRequest) -> dict:
+    """Today's bird/joke/habit…: first tap of the day asks ChatGPT, later taps replay the same answer."""
+    if req.kind not in OF_THE_DAY:
+        raise HTTPException(400, f"unknown item {req.kind!r}")
+    label, subject, extra, group = OF_THE_DAY[req.kind]
+    title = f"{label} of the day"
+    token = kid.begin(title)
+    t0 = time.time()
+    data, day = _otd_load(), _otd_today()
+    saved = data["days"].get(day, {}).get(req.kind)
+    if saved:  # already picked today → same answer, no ChatGPT
+        kid.answer, kid.options = saved["answer"], parse_options(saved["answer"])
+        kid.today = {"kind": req.kind, **saved}
+        try:
+            await kid.speak(token, saved["answer"])
+        except Exception as e:
+            raise HTTPException(502, f"speaker failed: {e}") from e
+        return {"heard": title, "answer": saved["answer"], "options": kid.options,
+                "asks_back": saved["answer"].rstrip().endswith("?"), "today": req.kind, "today_group": group,
+                "replayed": True, "spoken": True, "mode": kid.current_mode(), "score": kid.score,
+                "seconds": {"total": round(time.time() - t0, 1)}}
+    past = data["history"].get(req.kind, [])[-40:]
+    avoid = f" Don't choose any of these, we had them before: {', '.join(past)}." if past else ""
+    prompt = (f"Let's do the {subject} of the day! {extra}{avoid} "
+              f"Start your reply with exactly: \"Today's {subject} is\". Keep it short and fun.")
+    result = await _kid_answer(token, prompt, t0, t0, filler=True, label=title)
+    raw = (browser.last or {}).get("answer_raw") or result["answer"]
+    name = _otd_name(raw)
+    kid.today = {"kind": req.kind, "name": name, "answer": result["answer"]}
+    data["days"].setdefault(day, {})[req.kind] = {"name": name, "answer": result["answer"]}
+    data["history"][req.kind] = (past + [name])[-60:]
+    with contextlib.suppress(Exception):
+        _otd_save(data)
+    print(f"[today] {req.kind}: {name!r}")
+    return {**result, "today": req.kind, "today_group": group, "replayed": False}
 
 
 class KidSpeak(BaseModel):

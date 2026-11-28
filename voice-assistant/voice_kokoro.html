@@ -21,6 +21,15 @@
  .grid button{padding:20px 8px;font-size:32px;font-weight:800}
  .row{display:flex;gap:14px;margin-top:14px}
  .row button{flex:1;padding:16px 8px;font-size:28px;font-weight:700}
+ #game{margin-top:18px;padding:12px;border:4px double #000;border-radius:18px}
+ #gameTitle{font-size:32px;font-weight:800}
+ #stars{font-size:34px;margin:4px 0}
+ #playBox{margin-top:24px}
+ #playBox .label{font-size:30px;font-weight:800;margin-bottom:4px}
+ .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+ .grid3 button{padding:16px 6px;font-size:24px;font-weight:700;line-height:1.25}
+ #todayToggle{display:block;width:100%;margin-top:14px;padding:18px 8px;font-size:30px;font-weight:800}
+ #todayBox h3{font-size:24px;margin:16px 0 6px;text-align:left}
  details{margin-top:28px;text-align:left;font-size:20px;border-top:3px solid #000;padding-top:10px}
  summary{font-size:22px;font-weight:700;cursor:pointer}
  details button{font-size:22px;padding:10px 16px;border-width:3px;border-radius:12px;margin:8px 8px 0 0}
@@ -42,6 +51,19 @@
  <button id="slower">🐢 Slower</button>
 </div>
 
+<div id="game" hidden>
+ <div id="gameTitle"></div>
+ <div id="stars"></div>
+ <div class="row" id="gameButtons"></div>
+</div>
+
+<div id="playBox">
+ <div class="label">🎮 Let's play!</div>
+ <div id="play" class="grid3"></div>
+ <button id="todayToggle">📅 Today's surprises</button>
+ <div id="todayBox" hidden></div>
+</div>
+
 <details id="grown">
  <summary>Grown-ups</summary>
  <button id="stop">⏹ Stop the speaker</button>
@@ -55,18 +77,42 @@ const $ = id => document.getElementById(id);
 if (new URLSearchParams(location.search).has('grownup')) $('grown').open = true;
 
 const NORMAL = [['more', '➕ Tell me more!'], ['why', '🤔 Why?'], ['easier', '🧸 Say it easier'], ['quiz', '❓ Quiz me!']];
-const ASKS_BACK = [['yes', '✅ Yes!'], ['tellme', '🙋 Tell me!'], ['no', '❌ No, thanks'], ['more', '➕ Tell me more!']];
+const ASKS_BACK = [['yes', '✅ Yes!'], ['tellme', '🙋 Tell me!'], ['more', '➕ Tell me more!']];
+const GAMES = {quiz: '🏆 Quiz', animal: '🐾 Guess the animal', wyr: '🤔 Would you rather',
+               riddle: '🧩 Riddle', story: '📖 Story', word: '🔤 New word'};
+// extra buttons while a game is on (A/B/C/D option buttons are added automatically when the answer has them)
+const GAME_BUTTONS = {
+  quiz: [], wyr: [['another_wyr', '🔁 Another one!']],
+  animal: [['clue', '💡 Another clue'], ['giveup', '🙋 Tell me!']],
+  riddle: [['riddle_clue', '💡 A clue'], ['riddle_answer', '🙋 Tell me!'], ['another_riddle', '🧩 Another riddle']],
+  story: [['end_story', '🌙 The end']],
+  word: [['another_word', '🔤 Another word'], ['use_again', '🗣️ Use it again']],
+};
 const WORDS = {idle: 'Tap and ask me!', thinking: 'Thinking…', speaking: 'Listen to the speaker!',
                recording: 'I\'m listening…', sending: 'Thinking…'};
 
 let server = {state: 'idle'}, local = null, shown = '', pollTimer = null, haveAnswer = false, note = '';
+let game = null, score = {right: 0, asked: 0}, lastAsksBack = false, lastOptions = [], lastToday = null;
+// "… of the day" cards (the server keeps today's pick, so a second tap replays the same one)
+const TODAY = [
+  ['Nature', [['bird', '🐦 Bird'], ['animal', '🐾 Animal'], ['sea', '🐠 Sea creature'], ['dino', '🦕 Dinosaur'],
+              ['bug', '🐞 Bug'], ['plant', '🌸 Flower or tree'], ['food', '🍎 Fruit or veggie']]],
+  ['Good habits', [['habit', '🌟 Good habit'], ['kind', '💛 Kindness'], ['feeling', '😊 Feeling'],
+                   ['health', '🦷 Healthy tip'], ['thanks', '🙏 Thank you']]],
+  ['Learning', [['word', '🔤 Word'], ['number', '🔢 Number'], ['country', '🌍 Country'], ['space', '🪐 Space fact'],
+                ['how', '🔬 How it works'], ['colour', '🎨 Colour']]],
+  ['Fun', [['joke', '😂 Joke'], ['riddle', '🧩 Riddle'], ['challenge', '🎯 Challenge'], ['move', '🤸 Move']]],
+];
+const TODAY_FOLLOW = {learn: [['today_more', '➕ Tell me more!'], ['today_quiz', '❓ Quiz me!']],
+                      habit: [['today_more', '➕ Tell me more!']], riddle: [['today_answer', '🙋 Tell me!']], none: []};
+let todayDone = [], drawnToday = null;
 function setNote(t) { note = t; draw(); setTimeout(() => { note = ''; draw(); }, 5000); }
 
 // ---------- drawing (only when something changed: e-ink friendly) ----------
 function draw(msg) {
   msg = msg || note;
   const state = local || server.state;
-  const key = state + '|' + (msg || '') + '|' + haveAnswer;
+  const key = state + '|' + (msg || '') + '|' + haveAnswer + '|' + game + '|' + score.right + '/' + score.asked + '|' + todayDone.join(',');
   if (key === shown) return;
   shown = key;
   $('status').textContent = msg || WORDS[state] || '';
@@ -75,29 +121,84 @@ function draw(msg) {
   mic.classList.toggle('rec', state === 'recording');
   mic.textContent = state === 'recording' ? '⏹ Done talking' : '🎤 Tap and ask';
   mic.disabled = busy && state !== 'recording';
-  document.querySelectorAll('#quick button, #replay button').forEach(b => b.disabled = busy);
-  $('quick').hidden = $('replay').hidden = !haveAnswer;
+  drawGame();
+  drawToday();
+  document.querySelectorAll('#quick button, #replay button, #play button, #gameButtons button, #todayBox button').forEach(b => b.disabled = busy);
+  $('replay').hidden = !haveAnswer;
+  $('quick').hidden = !haveAnswer || !$('quick').children.length;
 }
 
 function showAnswer(question, answer, asksBack, options) {
   $('card').hidden = false;
   $('q').textContent = '“' + question + '”';
   $('a').textContent = answer;
-  const q = $('quick'); q.innerHTML = '';
-  if (options && options.length) {          // multiple choice: one button per option
-    options.forEach(o => {
-      const b = document.createElement('button'); b.textContent = o.letter + '. ' + o.text;
-      b.onclick = () => quick('option', o.letter);
-      q.appendChild(b);
-    });
-  } else {
-    (asksBack ? ASKS_BACK : NORMAL).forEach(([kind, label]) => {
-      const b = document.createElement('button'); b.textContent = label;
-      b.onclick = () => quick(kind);
-      q.appendChild(b);
-    });
-  }
+  lastAsksBack = asksBack; lastOptions = options || [];
+  fillQuick();
   haveAnswer = true; shown = '';
+}
+
+function button(label, onclick) {
+  const b = document.createElement('button'); b.textContent = label; b.onclick = onclick; return b;
+}
+
+// Buttons under the answer: A/B/C/D options if the answer has them; otherwise the normal
+// quick replies (or none during a game - the game's own buttons are in the game box).
+function fillQuick() {
+  const q = $('quick'); q.innerHTML = '';
+  if (lastOptions.length) lastOptions.forEach(o => q.appendChild(button(o.letter + '. ' + o.text, () => quick('option', o.letter))));
+  else if (lastToday) (TODAY_FOLLOW[lastToday] || []).forEach(([k, l]) => q.appendChild(button(l, () => quick(k))));
+  else if (!game) (lastAsksBack ? ASKS_BACK : NORMAL).forEach(([k, l]) => q.appendChild(button(l, () => quick(k))));
+}
+
+let drawnGame = '';
+function drawGame() {
+  const quizDone = game === 'quiz' && score.asked >= 5;
+  const sig = game + '|' + score.right + '/' + score.asked;
+  if (sig === drawnGame) return;
+  drawnGame = sig;
+  $('game').hidden = !game;
+  $('playBox').hidden = !!game;
+  if (!$('play').children.length)
+    Object.entries(GAMES).forEach(([m, l]) => $('play').appendChild(button(l, () => play(m))));
+  fillQuick();
+  if (!game) return;
+  $('gameTitle').textContent = quizDone ? '🏆 Quiz done!' : GAMES[game];
+  $('stars').textContent = game === 'quiz'
+    ? (score.right ? '⭐'.repeat(score.right) + '  ' : '') + `${score.right} of ${score.asked}` : '';
+  const gb = $('gameButtons'); gb.innerHTML = '';
+  (GAME_BUTTONS[game] || []).forEach(([k, l]) => gb.appendChild(button(l, () => quick(k))));
+  if (quizDone) gb.appendChild(button('🏆 New quiz', () => play('quiz')));
+  gb.appendChild(button('🏠 End game', endGame));
+}
+
+function setGame(d) {
+  if (!d || !('mode' in d)) return;
+  game = d.mode || null; score = d.score || {right: 0, asked: 0};
+}
+
+function drawToday() {
+  const sig = todayDone.join(',');
+  if (sig === drawnToday) return;
+  drawnToday = sig;
+  const box = $('todayBox'); box.innerHTML = '';
+  TODAY.forEach(([title, items]) => {
+    const h = document.createElement('h3'); h.textContent = title; box.appendChild(h);
+    const g = document.createElement('div'); g.className = 'grid3';
+    items.forEach(([k, l]) => g.appendChild(button(l + (todayDone.includes(k) ? ' ✓' : ''), () => today(k))));
+    box.appendChild(g);
+  });
+}
+$('todayToggle').onclick = () => { $('todayBox').hidden = !$('todayBox').hidden; drawToday(); };
+async function today(kind) {
+  $('todayBox').hidden = true; clearAnswer();
+  handleAnswer(await post('/voice-kokoro/today', {kind}));
+}
+
+async function play(mode) { clearAnswer(); handleAnswer(await post('/voice-kokoro/play', {mode})); }
+async function endGame() {
+  try { setGame(await (await fetch('/voice-kokoro/play', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                          body: JSON.stringify({mode: 'stop'})})).json()); } catch (e) {}
+  shown = ''; draw();
 }
 
 function clearAnswer() {   // a new question is starting: empty the answer area right away
@@ -122,7 +223,7 @@ async function poll() {
   clearTimeout(pollTimer);
   try {
     const st = await (await fetch('/voice-kokoro/state')).json();
-    server = st;
+    server = st; setGame(st); todayDone = st.today_done || [];
   } catch (e) {}
   draw();
   pollTimer = setTimeout(poll, (local || server.state !== 'idle') ? 1000 : 5000);
@@ -145,6 +246,8 @@ async function post(url, body, isForm) {
 
 async function handleAnswer(d) {
   if (!d || !d.answer) return;
+  setGame(d);
+  lastToday = d.today ? d.today_group : null;
   showAnswer(d.heard, d.answer, d.asks_back, d.options);
   addHistory(d.heard, d.answer, d.seconds);
   if (d.speak_error) $('timing').textContent += ' · speaker: ' + d.speak_error;
