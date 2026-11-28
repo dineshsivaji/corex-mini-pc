@@ -826,7 +826,7 @@ HEARD_PHRASES = [
     "Okay, let me look it up!", "Wait for it!", "Ooh, I wonder!", "Here we go!",
     "Let me ask my brain!", "Ooh, interesting!", "Okay, give me a tiny moment!",
     "Hmm, let me remember!", "Ooh, let's find out together!", "Thinking, thinking!",
-    "Oh, I love finding things out!", "Let me get my explorer hat!", "Ready, set, think!",
+    "Oh, I love finding things out!", "Let me get my explorer hat!", "Ready... set... think!",
 ]
 SAY = {
     "no_words": "Oops, I didn't hear you. Tap and try again!",

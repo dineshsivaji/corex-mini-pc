@@ -92,6 +92,11 @@ function showAnswer(question, answer, asksBack) {
   haveAnswer = true; shown = '';
 }
 
+function clearAnswer() {   // a new question is starting: empty the answer area right away
+  $('card').hidden = true; $('q').textContent = ''; $('a').textContent = '';
+  haveAnswer = false; shown = ''; draw();
+}
+
 function addHistory(question, answer, seconds) {
   const d = document.createElement('div'); d.className = 'h';
   d.innerHTML = '<b></b><span></span><br>';
@@ -138,7 +143,7 @@ async function handleAnswer(d) {
   poll();
 }
 
-async function quick(kind, label) { handleAnswer(await post('/voice-kokoro/quick', {kind})); }
+async function quick(kind, label) { clearAnswer(); handleAnswer(await post('/voice-kokoro/quick', {kind})); }
 $('again').onclick = () => post('/voice-kokoro/speak', {});
 $('slower').onclick = () => post('/voice-kokoro/speak', {slow: true});
 $('stop').onclick = async () => { local = null; await fetch('/voice-kokoro/stop', {method: 'POST'}); poll(); };
@@ -177,7 +182,7 @@ async function startRecording() {
     sendRecording(new Blob(chunks, {type}), type.includes('mp4') ? 'question.m4a' : 'question.webm');
   };
   rec.start();
-  local = 'recording'; heardSpeech = false; draw();
+  local = 'recording'; heardSpeech = false; clearAnswer();
   watchSilence(stream);
   maxTimer = setTimeout(() => rec.state === 'recording' && rec.stop(), 20000);   // safety stop
 }
