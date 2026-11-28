@@ -816,12 +816,17 @@ KOKORO_URL = os.environ.get("KOKORO_URL", "http://127.0.0.1:8880").rstrip("/")
 KOKORO_VOICE = os.environ.get("KOKORO_VOICE", "af_heart")
 KOKORO_SPEED = float(os.environ.get("KOKORO_SPEED", "1.0"))
 KOKORO_SLOW_SPEED = float(os.environ.get("KOKORO_SLOW_SPEED", "0.85"))  # the "Slower" button
-KOKORO_KEEP = 60  # cached clips (answers + fixed phrases); same text → no re-generation
+KOKORO_KEEP = 100  # cached clips (answers + fixed phrases); same text → no re-generation
 
 # Said right after the question was understood, while ChatGPT works (one at random, no repeats).
 HEARD_PHRASES = [
     "Ooh, good one!", "Hmm, let me think!", "Let me find out!", "Okay, thinking cap on!",
-    "Ooh, let me look in my brain!", "One moment!", "Hmm, let me see!",
+    "Ooh, let me look in my brain!", "One moment!", "Hmm, let me see!", "Ooh, let me check!",
+    "Just a second, buddy!", "Let me think about that!", "Ooh, how exciting!", "Hmm, good thinking!",
+    "Okay, let me look it up!", "Wait for it!", "Ooh, I wonder!", "Here we go!",
+    "Let me ask my brain!", "Ooh, interesting!", "Okay, give me a tiny moment!",
+    "Hmm, let me remember!", "Ooh, let's find out together!", "Thinking, thinking!",
+    "Oh, I love finding things out!", "Let me get my explorer hat!", "Ready, set, think!",
 ]
 SAY = {
     "no_words": "Oops, I didn't hear you. Tap and try again!",
@@ -1121,7 +1126,7 @@ async def kid_quick(req: QuickReply) -> dict:
         raise HTTPException(400, f"unknown quick reply {req.kind!r}")
     token = kid.begin(question)
     t0 = time.time()
-    return await _kid_answer(token, question, t0, t0, filler=False)
+    return await _kid_answer(token, question, t0, t0, filler=True)
 
 
 class KidSpeak(BaseModel):
